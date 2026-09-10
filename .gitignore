@@ -1,0 +1,16 @@
+# colcon build artifacts - reproducible via setup.md
+build/
+install/
+log/
+
+# vendor clones - reproducible via setup.md (git clone + vcs import)
+src/ur_python_utilities/
+src/cartesian_controllers/
+
+# vendored D435 meshes (~45MB, largely un-decimated) - reproducible via
+# src/ur_camera_gz/meshes/fetch_meshes.sh
+src/ur_camera_gz/meshes/d435i/part_*/
+
+# python
+__pycache__/
+*.pyc

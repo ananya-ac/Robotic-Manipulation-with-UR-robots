@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ur_bringup_gz</name>
+  <version>0.1.0</version>
+  <description>
+    Final assembled robot descriptions and bringup launch files for gz-sim,
+    composing ur_gripper_gz (arm+gripper) with ur_camera_gz (wrist camera).
+    Neither of those packages knows about the other or about this package;
+    this is the only place that decides what the actual simulated robot is.
+  </description>
+
+  <maintainer email="aa2334@g.rit.edu">Ananya Acharya</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>ur_gripper_gz</exec_depend>
+  <exec_depend>ur_camera_gz</exec_depend>
+  <exec_depend>worlds</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
