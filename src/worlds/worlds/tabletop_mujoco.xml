@@ -1,0 +1,120 @@
+<mujoco model="tabletop">
+  <!--
+    MuJoCo counterpart of tabletop.sdf: a static table plus 3 graspable cubes, matching that
+    file's geometry/poses/colors exactly so downstream code (data collection, grasp targets)
+    doesn't need per-backend numbers. See tabletop.sdf's own comments for the sourcing of
+    those values (table position derived from tf2_echo against the robot's default pose,
+    cube spacing chosen to avoid initial contact, friction mu=1.0 for grasp reliability).
+
+    Robot include: MuJoCo composes a full simulation from ONE compiled MJCF, so the robot
+    (arm+gripper+camera, generated from ur5e_2f85_camera_mujoco.urdf.xacro by
+    make_mjcf_from_robot_description.py) has to be pulled in via a plain MJCF <include>,
+    unlike Gazebo where the world runs standalone and the robot is spawned into it later at
+    launch time. ROBOT_MJCF_PATH below is a placeholder - the launch file (not yet written,
+    see the migration project memory's "not yet done" list) needs to either regenerate this
+    scene file with the real path substituted in, or always output the robot's MJCF to a
+    fixed, well-known path this <include> can reference directly. Until that's wired up, this
+    file is validated standalone by hand-substituting a real path (see the migration memory
+    for the exact validation command used).
+  -->
+  <include file="ROBOT_MJCF_PATH"/>
+
+  <!-- Grasp-holding fix, not tuning: MuJoCo's default regularized friction model has NO true
+       static-friction stick state - a pinched object drifts out of a grip at a roughly
+       constant creep rate even when the load is well inside the Coulomb friction cone
+       (confirmed against google-deepmind/mujoco#3328, which measured ~9mm/min creep at
+       default solver settings for an analogous pinch-grasp case; matches exactly what we saw
+       live - gripper closes and stalls correctly, but the cube slips back out during a lift,
+       even via a manual rviz-driven MoveIt command with no scripted trajectory involved, so
+       not a trajectory/planning artifact). Raising friction coefficients or contact
+       stiffness (solref/solimp) only modestly helps this specific failure mode (per that
+       issue's own measurements, ~3x at best) because the leak is in how MuJoCo's default
+       solver iterates tangential contact forces, not in the friction cone itself being too
+       small. The two effective fixes are both here:
+         - noslip_iterations: a post-pass solver refinement specifically for this creep
+           (~110x improvement in the referenced issue, 155 -> 1.4 micrometers/s creep).
+         - impratio: biases the solver's impedance ratio between normal and tangential
+           (frictional) constraints toward tangential, directly reducing slip (~10x
+           improvement at impratio=10 in the same measurements).
+       Global <option> settings (not per-geom), so they belong at the scene level, not
+       per-object friction/solref tuning on the cubes below. -->
+  <option noslip_iterations="10" impratio="10"/>
+
+  <statistic center="-0.5 0 0.4" extent="1.2"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"/>
+    <material name="table_wood" rgba="0.55 0.4 0.28 1"/>
+    <material name="cube_red" rgba="0.8 0.1 0.1 1"/>
+    <material name="cube_green" rgba="0.1 0.7 0.1 1"/>
+    <material name="cube_blue" rgba="0.1 0.1 0.8 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 10" dir="-0.5 0.1 -0.9" directional="true" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <geom name="floor" type="plane" size="0 0 0.01" material="groundplane" contype="1" conaffinity="0"/>
+
+    <!-- Table: 0.6x0.6m top, 0.3m tall (top surface at z=0.3; was 0.4m tall/z=0.4 - lowered
+         10cm on request, which also directly helps a real reachability limit found during
+         grasp testing: with the gripper's approach constrained close to vertical, cube_0's
+         position leaves only ~1.5cm of vertical workspace above grasp height before the
+         elbow nears full extension - see mujoco_grasp_test.py's own comments for the offline
+         KDL IK + live OMPL evidence for this. Lowering the table moves the whole grasp height
+         further from that fixed ceiling, buying more usable hover/lift clearance without
+         changing the ceiling itself). Centered at x=-0.6, NOT tabletop.sdf's x=-0.5 (a
+         deliberate MuJoCo-specific divergence from that file, which this comment used to
+         claim exact parity with - no longer true for table/cube position, still true for
+         size/mass/friction/color). Shifted 0.1m further from the robot base after confirming
+         live + reproducing offline that the original -0.5 position let the robot's own
+         upper_arm_link clip the table's near edge (contact at world x=-0.2003, i.e. exactly
+         the table's boundary, dist=-0.0004 - a marginal but real collision) whenever the arm
+         moved to a fully-vertical pose (e.g. MoveIt's SRDF-defined "home" state,
+         shoulder_lift=-90deg with everything else 0) - not a software bug, the arm was
+         genuinely about to swing through solid geometry and the simulation correctly stopped
+         it via the self-collision-exclusion fix's ncon>0 path. -0.1m was chosen empirically
+         (not calculated from first principles): confirmed to fully clear the contact (d.ncon
+         shows zero table contacts at the settled home pose) while being a small fraction of
+         the UR5e's ~850mm reach. Static: no <joint>, so it's welded to the world by default.
+         MJCF box <size> is HALF-extents (0.6/2, 0.6/2, 0.3/2), unlike SDF's full-extent
+         <size> - halved accordingly below. -->
+    <body name="table" pos="-0.6 0 0.15">
+      <geom type="box" size="0.3 0.3 0.15" material="table_wood"/>
+    </body>
+
+    <!-- Cubes: 4.5cm boxes (half-extent 0.0225), mass 0.065kg (light wood/plastic block,
+         within the UR5e/2F-85's payload and gripper stroke - see the original cube_red
+         model.sdf's own comment). No explicit <inertial>: MuJoCo's compiler auto-derives a
+         uniform-density solid-box inertia tensor from geom shape + mass, which is exactly
+         what the SDF's hand-computed I=(1/6)*m*a^2 formula also assumed - equivalent, less
+         error-prone to let the compiler do it. friction="1.0 0.005 0.0001" (sliding,
+         torsional, rolling) matches the SDF's mu=1.0 request for sliding friction (MuJoCo's
+         own default happens to already be 1.0 there; set explicitly for clarity, not
+         reliance on the default). <freejoint/> gives each cube unconstrained 6-DOF motion,
+         and is what makes them addressable by name via mujoco_ros2_control's
+         SetFreeJointState/ResetWorld services for episode resets (see the migration project
+         memory - these are built-in services, no custom reset node needed, directly
+         analogous to Gazebo's set_pose that tabletop.sdf's own comment described wanting).
+         Initial poses (well-separated, ~0.1-0.2m apart) match tabletop.sdf's cube_0/1/2
+         placements exactly. -->
+    <body name="cube_0" pos="-0.7 -0.15 0.3225">
+      <freejoint/>
+      <geom type="box" size="0.0225 0.0225 0.0225" mass="0.065" material="cube_red" friction="1.0 0.005 0.0001"/>
+    </body>
+    <body name="cube_1" pos="-0.6 0.1 0.3225">
+      <freejoint/>
+      <geom type="box" size="0.0225 0.0225 0.0225" mass="0.065" material="cube_green" friction="1.0 0.005 0.0001"/>
+    </body>
+    <body name="cube_2" pos="-0.5 -0.1 0.3225">
+      <freejoint/>
+      <geom type="box" size="0.0225 0.0225 0.0225" mass="0.065" material="cube_blue" friction="1.0 0.005 0.0001"/>
+    </body>
+  </worldbody>
+</mujoco>

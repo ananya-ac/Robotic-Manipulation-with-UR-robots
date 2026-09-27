@@ -1,0 +1,62 @@
+<?xml version="1.0" ?>
+<!--
+  4.5cm cube, mass/inertia for a light wood/plastic block (density ~715 kg/m^3,
+  mass 0.065kg: comfortably within a UR5e's payload and a 2F-85/Hand-E gripper
+  stroke, not so light it causes contact/numeric issues). Solid-cube inertia:
+  I = (1/6) * m * a^2 for all three axes (uniform density, centered at COM).
+
+  Friction set high (mu/friction = 1.0, both ODE and bullet blocks since this
+  workspace runs bullet-featherstone) per data_plan.md's grasping mitigation;
+  this is a fallback for stability/plausibility, not the primary grasp
+  mechanism; the actual grasp reliability solution is the DetachableJoint
+  system plugin added when wiring up the gripper (data_plan.md Step 1
+  "Gazebo gotchas").
+-->
+<sdf version="1.9">
+  <model name="cube_green">
+    <link name="link">
+      <inertial>
+        <mass>0.065</mass>
+        <inertia>
+          <ixx>0.0000219375</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.0000219375</iyy>
+          <iyz>0</iyz>
+          <izz>0.0000219375</izz>
+        </inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.045 0.045 0.045</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.1 0.7 0.1 1</ambient>
+          <diffuse>0.1 0.7 0.1 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.045 0.045 0.045</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
+            </ode>
+            <bullet>
+              <friction>1.0</friction>
+              <friction2>1.0</friction2>
+            </bullet>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+  </model>
+</sdf>

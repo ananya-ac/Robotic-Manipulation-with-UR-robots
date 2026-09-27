@@ -1,0 +1,163 @@
+<?xml version="1.0" ?>
+<!--
+  Minimal tabletop world for cube pick-and-stack data collection
+  (data_plan.md). A static table plus 3 graspable cubes (cubes_sim package),
+  nothing else: no warehouse clutter, unlike worlds/warehouse.sdf which
+  was built for a different task.
+
+  System plugins copied from the same verified stock-world header used in
+  warehouse.sdf (Physics, UserCommands, SceneBroadcaster, Contact), plus
+  Sensors included from the start this time: warehouse.sdf initially
+  shipped without it and every rendering sensor (the wrist camera) silently
+  produced zero frames until that was diagnosed; see ur_camera_sim's
+  realsense_d435.gazebo.xacro and this workspace's git history for that
+  investigation. This world doesn't have a camera yet (data_plan.md's
+  state-based phase doesn't need one), but Step 3's vision phase will, so
+  the system is here now rather than re-discovering the same bug later.
+
+  Physics timing matches warehouse.sdf and the stock empty.sdf (1ms step)
+  for the same reason: this workspace's controllers
+  (scaled_joint_trajectory_controller etc.) are tuned against that step size.
+
+  Cube instances use flat <include> (own <name>/<pose>, not wrapped in a
+  <model> tag) rather than the nested-model form: bullet-featherstone
+  (required for this workspace's gripper mimic joints) does not implement
+  ConstructSdfNestedModel (gazebosim/gz-physics#546). This is the same fix
+  applied to warehouse.sdf's AWS RoboMaker model includes, verified there
+  to avoid a "nothing has real collision" failure mode.
+
+  Cube reset strategy: use gz's set_pose service to reposition existing
+  cube_0/cube_1/cube_2 instances between episodes, not delete+respawn.
+  data_plan.md's grasp-fix plugin (DetachableJoint) references a fixed
+  child_model name per instance; keeping cube_0/cube_1/cube_2 as stable,
+  persistent model names (rather than fresh names each episode) is what
+  keeps that wiring valid across resets.
+-->
+<sdf version="1.9">
+  <world name="tabletop">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin
+      filename="gz-sim-contact-system"
+      name="gz::sim::systems::Contact">
+    </plugin>
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <gravity>0 0 -9.8</gravity>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.8 0.8 0.8 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 0.6 x 0.6m top, 0.4m tall (top surface at z=0.4). Centered at x=-0.5,
+         not +0.5: verified via `ros2 run tf2_ros tf2_echo world tool0` with
+         the robot spawned in this world at its default initial joint pose,
+         tool0 rests near (-0.5, -0.13, 0.64): the base_link's own +90deg
+         yaw (also tf2_echo-verified) combined with the arm's initial joint
+         angles puts the reach envelope on the -X side, not +X as originally
+         guessed from the URDF's spawn-pose yaw alone. -->
+    <model name="table">
+      <static>true</static>
+      <pose>-0.5 0 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.6 0.6 0.4</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.6 0.6 0.4</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.55 0.4 0.28 1</ambient>
+            <diffuse>0.55 0.4 0.28 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Table top at z=0.4, cube half-height 0.0225, so cube center z=0.4225.
+         Well-separated initial placements (about 0.1 to 0.2m apart, cube edge
+         0.045m) to avoid any initial contact/overlap; actual per-episode
+         placement will randomize these via set_pose. -->
+    <include>
+      <name>cube_0</name>
+      <pose>-0.6 -0.15 0.4225 0 0 0</pose>
+      <uri>model://cube_red</uri>
+    </include>
+
+    <include>
+      <name>cube_1</name>
+      <pose>-0.5 0.1 0.4225 0 0 0</pose>
+      <uri>model://cube_green</uri>
+    </include>
+
+    <include>
+      <name>cube_2</name>
+      <pose>-0.4 -0.1 0.4225 0 0 0</pose>
+      <uri>model://cube_blue</uri>
+    </include>
+
+  </world>
+</sdf>

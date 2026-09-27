@@ -1,0 +1,26 @@
+# mujoco_ros2_control plugin config, loaded as a plain ROS param file into ros2_control_node
+# (same mechanism as ur_mujoco_2f85_controllers.yaml, NOT a <ros2_control><hardware><param>
+# in the URDF - confirmed against mujoco_ros2_control_demos' 01_basic_robot.launch.py, the
+# only reference implementation, which passes this exact file as another ParameterFile(...)
+# entry alongside the controllers yaml).
+#
+# free_joint_state_publisher: makes the tabletop cubes' poses observable from outside the
+# sim - needed to verify a grasp actually holds (cube pose tracks the gripper through a lift)
+# rather than eyeballing it. Publishes ALL free-joint bodies in the compiled model
+# (mujoco_ros2_control_msgs/msg/FreeJointStateArray on topic "free_joint_states"; confirmed
+# via the plugin library that there's no body-allowlist param - it auto-discovers every free
+# joint, so it will also publish the D435... no, the camera has no free joint; it will just
+# publish cube_0/cube_1/cube_2, the only free-joint bodies in tabletop_mujoco.xml).
+# frame_id="" means poses are in the world frame (see FreeJointStateArray.msg's own doc).
+#
+# CHECK LIVE: the camera plugin (CameraPlugin) was found to publish inside its OWN node
+# namespace ("mujoco_camera_plugin/...") rather than at the requested topic root, requiring
+# absolute (leading-/) topic overrides to fix - confirm via `ros2 topic list` whether
+# free_joint_states needs the same treatment before relying on it.
+/**:
+  ros__parameters:
+    mujoco_plugins:
+      free_joint_state_publisher:
+        type: "mujoco_ros2_control_plugins/FreeJointStatePublisherPlugin"
+        frame_id: ""
+        publish_rate: 30.0

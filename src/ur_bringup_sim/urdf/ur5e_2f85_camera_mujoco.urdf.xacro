@@ -1,0 +1,180 @@
+<?xml version="1.0"?>
+<!--
+  UR + Robotiq 2F-85 + D435 wrist camera, for mujoco_ros2_control.
+  MuJoCo counterpart of ur5e_2f85_camera_gz.urdf.xacro.
+
+  Two differences from the Gazebo file, both deliberate:
+
+  1. No DetachableJoint grasp-fix. The Gazebo file rigidly welds wrist_3_link to
+     whichever cube is grasped (gz-sim's DetachableJoint system) because friction-only
+     grasping was unreliable there - see that file's own comment for the full history.
+     That was the entire motivation for this migration (migration.md): grasping should
+     now depend on real contact/friction, tuned via the gripper's actuator gains and
+     the mimic-joint <equality> constraints (see ur_gripper_2f85_mujoco.urdf.xacro's own
+     comments on that tuning work). No MuJoCo equivalent is added here on purpose.
+
+  2. Camera sensor plugin swapped: realsense_d435.gazebo.xacro's rgbd_camera plugin
+     has no MuJoCo equivalent, replaced with mujoco_ros2_control's native camera
+     support (a <processed_inputs><camera> tag plus a ros2_control <sensor> block
+     naming the ROS topics). The D435 geometry macro itself (realsense_d435.xacro)
+     is hardware-agnostic and reused unchanged.
+
+  Unlike the Gazebo file, this is NOT a "pure composition, neither file aware of the
+  other" - it can't be, for MuJoCo specifically: mujoco_ros2_control ties one whole
+  simulation to one hardware component, so the camera sensor MUST land inside the SAME
+  <mujoco_inputs>/<ros2_control> blocks ur_gripper_2f85_mujoco.urdf.xacro already builds,
+  not a second independent pair (which would spin up a second, separate MuJoCo instance).
+  See that file's own standalone/extra_processed_inputs/extra_ros2_control_sensors
+  comments for the full mechanism this file relies on: it sets those two property blocks
+  BEFORE including that file (with standalone:=false, so that file's own default-empty
+  invocation doesn't fire and overwrite these), then calls its extras macro directly.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+
+  <xacro:arg name="name" default="ur5e"/>
+  <xacro:arg name="ur_type" default="ur5e"/>
+  <xacro:arg name="tf_prefix" default=""/>
+  <xacro:arg name="mujoco_model_path" default=""/>
+  <xacro:arg name="headless" default="false"/>
+  <!-- Overrides ur_gripper_2f85_mujoco.urdf.xacro's own standalone default (confirmed
+       empirically: when the same xacro:arg is declared twice, the FIRST declaration's
+       default wins) so this file is self-sufficient - no need for whoever launches it to
+       remember to pass standalone:=false themselves. -->
+  <xacro:arg name="standalone" default="false"/>
+  <!-- Mount point, in tool0's own frame - same values/rationale as the Gazebo file. -->
+  <xacro:arg name="camera_offset" default="0"/>
+  <xacro:arg name="camera_offset_x" default="0"/>
+  <xacro:arg name="camera_offset_y" default="-0.0675"/>
+  <!-- Diagnostic only: override to a near-zero value (can't be exactly 0, MuJoCo requires
+       positive inertial mass) to test whether the D435's real mass (0.072kg, cantilevered
+       off wrist_3) is contributing to observed wrist behavior - inertia scales down with it
+       (see realsense_d435.xacro's own comment). Leave at the default for real use. -->
+  <xacro:arg name="camera_mass" default="0.072"/>
+
+  <!-- wrist camera geometry, mounted on the UR tool flange (rigid regardless of gripper).
+       Hardware-agnostic macro, identical to the Gazebo file's usage. Declared before
+       including the gripper file so camera_color_optical_frame exists by the time the
+       corrective-frame joint below references it. -->
+  <!-- visual='simple': the 9-part colored mesh's identically-named per-part "material_0.mtl"
+       files collide when mujoco_ros2_control's URDF->MJCF conversion flattens meshes into one
+       directory (confirmed via obj2mjcf's own "material_0.mtl ... does not exist" error) -
+       see realsense_d435.xacro's own comment on this macro's visual param. Cosmetic only:
+       the collision box (what actually matters physically) is unaffected. -->
+  <xacro:include filename="$(find ur_camera_sim)/urdf/inc/realsense_d435.xacro"/>
+  <xacro:ur_camera_d435 parent="$(arg tf_prefix)tool0" tf_prefix="$(arg tf_prefix)" sim="true"
+    visual="simple" mass="$(arg camera_mass)">
+    <origin xyz="$(arg camera_offset_x) $(arg camera_offset_y) $(arg camera_offset)"
+            rpy="0 -1.5707963267948966 -1.5707963267948966"/>
+  </xacro:ur_camera_d435>
+
+  <!-- mujoco_ros2_control's own add_cameras_from_sites (urdf_to_mujoco_utils.py) ALREADY
+       applies the ROS-optical -> MuJoCo camera convention automatically - it multiplies a
+       180-degree-about-X rotation onto whatever site's quaternion you point it at (its own
+       docstring cites REP-103 and MuJoCo's "looks toward -Z, +Y is up" convention as the
+       reason). An earlier version of this file ALSO added its own manual 180-about-X
+       corrective frame here (mirroring mujoco_ros2_control_demos' test_robot.urdf), which
+       double-applied that correction - two 180-about-X rotations compose to identity,
+       leaving the camera pointed backwards (confirmed live, then fixed by removing that
+       frame and pointing straight at camera_color_optical_frame).
+
+       That fix got the facing direction right, but left the image rolled 180 degrees about
+       the viewing axis (confirmed by rendering an offscreen frame directly with
+       mujoco.Renderer and inspecting it: gripper appeared at the top instead of the bottom;
+       rotating that same rendered image 180 degrees in Python moved it to the bottom,
+       confirming the fix below rather than guessing at it). This is a SEPARATE defect from
+       the facing-direction one - a roll about the optical axis, independent of which way the
+       camera is looking - most likely from how camera_offset's mounting rpy
+       ("0 -pi/2 -pi/2") composes with the D435 macro's own internal frame chain; not fully
+       root-caused algebraically, fixed empirically instead. Corrected here with an explicit
+       180-about-Z frame applied AFTER camera_color_optical_frame (i.e. this is a real content
+       fix, not a reintroduction of the double-counted bug above - that one was 180-about-X,
+       this one is 180-about-Z, a different axis addressing a different symptom). -->
+  <link name="$(arg tf_prefix)camera_color_render_frame"/>
+  <joint name="$(arg tf_prefix)camera_color_render_joint" type="fixed">
+    <parent link="$(arg tf_prefix)camera_color_optical_frame"/>
+    <child link="$(arg tf_prefix)camera_color_render_frame"/>
+    <origin xyz="0 0 0" rpy="0 0 3.14159265358979"/>
+  </joint>
+
+  <!-- Toe-in correction: the D435 is mounted camera_offset_y=-0.0675m off the tool's own
+       centerline (real physical clearance from the gripper adapter body - confirmed by
+       testing camera_offset_y=0, which moves the camera into/right next to the mount
+       hardware and occludes the view, not a viable fix), and mounted looking straight
+       forward (parallel to tool0's Z), so without any inward correction the gripper appears
+       badly off-center in frame (confirmed by rendering: at 0 toe-in, gripper_tip_link's
+       site projects to pixel u=227 of 640 - about 93px left of center - while the visually
+       dominant near-field gripper body mass, being much closer to the camera and therefore
+       more strongly affected by the same lateral offset, appears shifted the OTHER way,
+       filling the right ~70% of frame). Since the camera and gripper are both rigid on the
+       same body (wrist_3_link), this is a fixed geometric relationship independent of arm
+       pose - solved once via binary search on the rendered projection (not algebra: this
+       file's own camera-orientation history is two rounds of wrong quaternion-composition
+       guesses, fixed only by actually rendering and checking, same approach used here) for
+       the angle that puts gripper_tip_link's site exactly at the image's horizontal center
+       (u=320 of 640) at any pose: 11.385 degrees (0.1987066 rad) toe-in about this frame's
+       own Y axis, applied as the LAST rotation in the chain (after the roll-fix above). Sign
+       needed rpy="0 -0.1987066 0" (NEGATIVE), not the "+" a naive rotate-in-the-direction-you-
+       want-things-to-move intuition suggests - confirmed only by generating this exact xacro
+       through the real URDF->MJCF pipeline and checking the resulting projection (a "+"
+       first attempt, verified correct by directly perturbing the compiled MJCF's cam_quat in
+       isolation, produced a DIFFERENT composed quaternion once run back through the actual
+       xacro chain - the URDF fixed-joint composition order doesn't match the isolated
+       post-multiply used to originally find the angle magnitude). Re-verified via the real
+       xacro/convert/render pipeline end to end after flipping the sign, not assumed.
+       Only centers the tip point exactly; the gripper's own very-near-field body will still
+       show mild parallax asymmetry (expected/unavoidable for any off-axis-mounted wrist
+       camera - the real D435 mount has the same property) but is now visually balanced
+       rather than filling one side of frame. -->
+  <link name="$(arg tf_prefix)camera_color_toein_frame"/>
+  <joint name="$(arg tf_prefix)camera_color_toein_joint" type="fixed">
+    <parent link="$(arg tf_prefix)camera_color_render_frame"/>
+    <child link="$(arg tf_prefix)camera_color_toein_frame"/>
+    <origin xyz="0 0 0" rpy="0 -0.1987066 0"/>
+  </joint>
+
+  <!-- Camera's MJCF <processed_inputs> entry - merged into ur_gripper_2f85_mujoco.urdf.xacro's
+       own <mujoco_inputs> via its extra_processed_inputs property (must be set before that
+       file is included below).
+       fovy is MuJoCo's full VERTICAL fov in degrees, derived (not guessed) from the Gazebo
+       sensor file's own sourced horizontal_fov=1.211259 rad at 640x480 (4:3):
+       fovy = 2*atan(tan(hfov/2) * height/width) = 2*atan(tan(0.6056) * 0.75) ~= 54.9 deg. -->
+  <xacro:property name="extra_processed_inputs">
+    <camera site="$(arg tf_prefix)camera_color_toein_frame" name="$(arg tf_prefix)camera"
+            fovy="54.9" mode="fixed" resolution="640 480"/>
+  </xacro:property>
+
+  <!-- Camera's ros2_control <sensor> entry - merged into ur_gripper_2f85_mujoco.urdf.xacro's
+       own <ros2_control> via its extra_ros2_control_sensors property. No state_interfaces:
+       camera data goes straight to these ROS topics, not through ros2_control interfaces
+       (confirmed: MujocoSystemInterface explicitly skips building a hardware interface for
+       'camera'-type sensors, matching mujoco_ros2_control_demos' own behavior).
+       Topic names deliberately match config/camera_bridge.yaml's ROS-side names (which
+       themselves match the real realsense2_camera driver's defaults for hardware parity) so
+       downstream perception consumers need no changes vs. the Gazebo setup.
+       KNOWN GAP vs. Gazebo: no point-cloud output here (camera_bridge.yaml also bridges
+       camera/depth/color/points; mujoco_ros2_control_plugins' CameraPlugin doesn't publish
+       one) - downstream code relying on the point cloud topic will need a depth-to-cloud
+       node, or this can be revisited if MuJoCo point-cloud output becomes available. -->
+  <xacro:property name="extra_ros2_control_sensors">
+    <sensor name="$(arg tf_prefix)camera">
+      <param name="frame_name">$(arg tf_prefix)camera_color_toein_frame</param>
+      <!-- Absolute topic paths (leading /), not relative: the CameraPlugin publishes
+           relative topic names inside its OWN node namespace (mujoco_camera_plugin),
+           not at the root - confirmed live (relative names here produced
+           /mujoco_camera_plugin/camera/color/image_raw instead of the intended
+           /camera/color/image_raw, leaving camera_bridge.yaml's downstream-consumer
+           topic names, and rviz's camera_view.rviz config, subscribed to nothing).
+           mujoco_ros2_control_demos' own working example uses absolute paths for the
+           same reason. -->
+      <param name="info_topic">/camera/color/camera_info</param>
+      <param name="image_topic">/camera/color/image_raw</param>
+      <param name="depth_topic">/camera/depth/image_rect_raw</param>
+    </sensor>
+  </xacro:property>
+
+  <xacro:include filename="$(find ur_gripper_sim)/urdf/ur_gripper_2f85_mujoco.urdf.xacro"/>
+
+  <xacro:ur_gripper_2f85_mujoco_extras tf_prefix="$(arg tf_prefix)"
+    mujoco_model_path="$(arg mujoco_model_path)" headless="$(arg headless)"/>
+
+</robot>

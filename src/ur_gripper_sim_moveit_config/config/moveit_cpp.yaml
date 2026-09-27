@@ -1,0 +1,37 @@
+# Only needed by moveit_py (MoveItPy) scripts, e.g. ur_control_examples/mujoco_grasp_test.py -
+# ur_moveit.launch.py's own move_group node never needed this file and still doesn't use it.
+#
+# MoveItCpp (moveit_py's underlying C++ core) reads its own top-level "planning_pipelines."
+# parameter namespace, separate from and in addition to the per-pipeline settings that
+# MoveItConfigsBuilder's .planning_pipelines(pipelines=["ompl"], ...) call already provides -
+# confirmed via libmoveit_cpp.so's own strings ("Failed to load any planning pipelines" /
+# "Failed to load planning pipelines from parameter server" both trace to a check for this
+# exact "planning_pipelines.pipeline_names" parameter). Without this file, MoveItPy()
+# construction throws RuntimeError("Failed to load planning pipelines from parameter server")
+# even though .planning_pipelines() succeeded and move_group-style pipeline configs loaded
+# fine - this key is MoveItCpp-specific, not shared with move_group's own pipeline loading.
+#
+# pilz_industrial_motion_planner added alongside ompl: OMPL for the general free-space move
+# to hover (RRTConnect, doesn't need a straight-line path), Pilz's LIN planner for the final
+# descend-into-grasp and lift/retreat (needs an actual straight Cartesian line - an
+# OMPL-planned descent was found live to swing the gripper into the cube off-axis and knock
+# it over, matching the exact failure mode MoveIt's own pick-and-place tutorials/moveit_grasps
+# use Cartesian/Pilz-LIN specifically to avoid).
+planning_pipelines:
+  pipeline_names: ["ompl", "pilz_industrial_motion_planner"]
+
+plan_request_params:
+  planning_time: 5.0
+  planning_attempts: 5
+  planning_pipeline: ompl
+  max_velocity_scaling_factor: 0.5
+  max_acceleration_scaling_factor: 0.5
+
+planning_scene_monitor_options:
+  name: "planning_scene_monitor"
+  robot_description: "robot_description"
+  joint_state_topic: "/joint_states"
+  attached_collision_object_topic: "/moveit_cpp/planning_scene_monitor"
+  publish_planning_scene_topic: "/moveit_cpp/publish_planning_scene"
+  monitored_planning_scene_topic: "/moveit_cpp/monitored_planning_scene"
+  wait_for_initial_state_timeout: 10.0

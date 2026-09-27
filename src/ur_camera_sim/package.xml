@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ur_camera_sim</name>
+  <version>0.1.0</version>
+  <description>
+    RealSense D435 description and gz-sim (Harmonic) sensor bridge, for mounting a
+    wrist camera on the UR + gripper assemblies in ur_gripper_sim. Kept as its own
+    package (perception) rather than folded into ur_gripper_sim (manipulation),
+    and outside the ur_python_utilities/cartesian_controllers vendor clones since
+    it is first-party code, not upstream.
+  </description>
+
+  <maintainer email="aa2334@g.rit.edu">Ananya Acharya</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>realsense2_description</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

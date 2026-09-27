@@ -1,0 +1,12 @@
+# Client params for ur_control.grippers.GripperController driving the gz 2F-85.
+# The gz gripper_controller is a GripperActionController (gripper_controller/gripper_cmd),
+# which matches GripperController's built-in gripper_type="85" path (no trajectory mode).
+#
+# Usage:
+#   ros2 run ur_control_examples joint_position_keyboard --gripper generic \
+#     --ros-args --params-file $(ros2 pkg prefix ur_gripper_sim)/share/ur_gripper_sim/config/gripper_2f85_client.yaml
+/**:
+  ros__parameters:
+    gripper_type: "85"
+    # actuated joint of the 2F-85 (the one the controller drives + we read state from)
+    joint: robotiq_85_left_knuckle_joint

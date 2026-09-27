@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<!--
+  ros2_control for UR arm + Robotiq Hand-E in gz-sim.
+
+  Extends ur_description's arm joint block with the single actuated finger_joint.
+  hande_right_finger_joint is a URDF <mimic> of finger_joint, enforced by gz with the
+  bullet-featherstone physics engine (the launch selects it), so it gets state interfaces
+  only — no command interface.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+
+  <xacro:include filename="$(find ur_description)/urdf/inc/ur_joint_control.xacro"/>
+
+  <xacro:macro name="ur_gripper_hande_ros2_control" params="
+    name
+    tf_prefix
+    transmission_hw_interface:=hardware_interface/PositionJointInterface
+    initial_positions:=${dict(shoulder_pan_joint=0.0,shoulder_lift_joint=-1.57,elbow_joint=0.0,wrist_1_joint=-1.57,wrist_2_joint=0.0,wrist_3_joint=0.0)}
+    finger_initial_position:=0.0">
+
+    <ros2_control name="${name}" type="system">
+      <hardware>
+        <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+      </hardware>
+
+      <xacro:ur_joint_control_description
+        tf_prefix="${tf_prefix}"
+        initial_positions="${initial_positions}"/>
+
+      <!-- Wrist force-torque sensor. Mirrors the real ur_robot_driver tcp_fts_sensor
+           (force.x..torque.z). gz_ros2_control's GazeboSimSystem backs these state
+           interfaces from the gz force_torque sensor of the SAME name (tcp_fts_sensor),
+           defined on wrist_3_joint in ur_gripper_hande_gz.urdf.xacro. The
+           force_torque_sensor_broadcaster reads it and publishes /wrench. -->
+      <sensor name="${tf_prefix}tcp_fts_sensor">
+        <state_interface name="force.x"/>
+        <state_interface name="force.y"/>
+        <state_interface name="force.z"/>
+        <state_interface name="torque.x"/>
+        <state_interface name="torque.y"/>
+        <state_interface name="torque.z"/>
+      </sensor>
+
+      <joint name="${tf_prefix}finger_joint">
+        <command_interface name="position"/>
+        <state_interface name="position">
+          <param name="initial_value">${finger_initial_position}</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <!-- mimic of finger_joint (see robotiq_hande_gripper.xacro), enforced by gz
+           (bullet-featherstone). Mimic joints get state interfaces only, no command. -->
+      <joint name="${tf_prefix}hande_right_finger_joint">
+        <state_interface name="position">
+          <param name="initial_value">${finger_initial_position}</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+    </ros2_control>
+  </xacro:macro>
+
+</robot>

@@ -4,7 +4,7 @@
   <name>worlds</name>
   <version>0.1.0</version>
   <description>
-    gz-sim world files for this workspace. Kept separate from ur_bringup_gz:
+    gz-sim world files for this workspace. Kept separate from ur_bringup_sim:
     the world (environment) is an independent concern from the robot being
     spawned into it, and varies independently of which robot/gripper/sensor
     combination is used.

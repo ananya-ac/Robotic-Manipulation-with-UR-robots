@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+<!--
+  UR + Robotiq 2F-85 + D435 wrist camera, for gz-sim (Harmonic).
+
+  Pure composition: includes ur_gripper_sim's existing standalone
+  ur_gripper_2f85_gz.urdf.xacro unmodified (its own <robot> wrapper is
+  discarded by xacro:include, its contents are spliced in here), then adds
+  the wrist camera from ur_camera_sim. Neither included package is edited or
+  aware of the other.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+
+  <xacro:arg name="name" default="ur5e"/>
+  <xacro:arg name="ur_type" default="ur5e"/>
+  <xacro:arg name="tf_prefix" default=""/>
+  <xacro:arg name="simulation_controllers" default=""/>
+  <!-- Mount point, in tool0's own frame ("X+ left, Y+ up, Z+ front" per
+       ur_description's flange-tool0 joint). Z is confirmed good at -0.03 (behind
+       tool0, clear of the gripper's own envelope); X/Y default to 0 (centered) but
+       the camera was seen clipping into nearby geometry laterally/vertically at
+       Z=-0.03, not yet isolated to which axis. Tune live via robot_gz.launch.py's
+       camera_offset/camera_offset_x/camera_offset_y args. -->
+  <xacro:arg name="camera_offset" default="0"/>
+  <xacro:arg name="camera_offset_x" default="0"/>
+  <xacro:arg name="camera_offset_y" default="-0.0675"/>
+
+  <xacro:include filename="$(find ur_gripper_sim)/urdf/ur_gripper_2f85_gz.urdf.xacro"/>
+
+  <!-- wrist camera, mounted on the UR tool flange (rigid regardless of gripper) -->
+  <xacro:include filename="$(find ur_camera_sim)/urdf/inc/realsense_d435.xacro"/>
+  <xacro:include filename="$(find ur_camera_sim)/urdf/inc/realsense_d435.gazebo.xacro"/>
+  <!-- Centered on tool0, facing forward: tool0 is "X+ left, Y+ up, Z+ front" (see
+       ur_description's flange-tool0 joint), and camera_link is "X+ forward, Y+ left,
+       Z+ up" (REP-103 camera convention), so rpy="0 -pi/2 -pi/2" is the rotation that
+       maps camera-forward/left/up onto tool0's front/left/up, respectively. -->
+  <xacro:ur_camera_d435 parent="$(arg tf_prefix)tool0" tf_prefix="$(arg tf_prefix)" sim="true">
+    <origin xyz="$(arg camera_offset_x) $(arg camera_offset_y) $(arg camera_offset)"
+            rpy="0 -1.5707963267948966 -1.5707963267948966"/>
+  </xacro:ur_camera_d435>
+  <xacro:ur_camera_d435_gazebo_sensor tf_prefix="$(arg tf_prefix)"/>
+
+  <!-- Grasp-fix (data_plan.md): physics-based grasping via friction alone is
+       unreliable (data_plan.md's "Gazebo gotchas" section); these attach a
+       fixed joint from wrist_3_link to whichever cube is grasped, via gz-sim's
+       DetachableJoint system, rather than depending on the gripper fingers
+       holding the cube through friction. child_model is a fixed string per
+       plugin instance (DetachableJoint has no dynamic or wildcard child), so
+       this is one instance per cube: names must match worlds/tabletop.sdf's
+       cube instances (cube_0/cube_1/cube_2) exactly, and those names must
+       stay stable across episode resets (set_pose, not delete+respawn) for
+       this wiring to keep working.
+
+       parent_link is wrist_3_link, not gripper_tip_link: the latter is
+       fixed-joint-only, so bullet-featherstone lumps it into wrist_3_link's
+       rigid body and it has no separate name in gz-sim: confirmed via
+       DetachableJoint's "Link with name gripper_tip_link not found in model
+       ur5e" error on the first real test. Since gripper_tip_link is rigidly
+       fixed to wrist_3_link (that's exactly why bullet-featherstone lumped
+       them together), a cube attached to wrist_3_link moves identically to
+       one attached to gripper_tip_link would have: this is not an
+       approximation.
+
+       IMPORTANT, confirmed via gz-sim8 source
+       (src/systems/detachable_joint/DetachableJoint.hh): this plugin STARTS
+       ATTACHED by design ("A system that initially attaches two models via a
+       fixed joint... A model can be re-attached during simulation via a
+       topic": the header's own words), and attachRequested defaults to
+       `true`, not false. So on spawn, all three instances immediately fuse
+       wrist_3_link to their cube SIMULTANEOUSLY, before any topic is ever
+       published; this is what caused an early observed glitch where all
+       three cubes rose together with conflicting rigid constraints from one
+       link. robot_gz.launch.py detaches all three shortly after spawn to
+       reach the actually-wanted "start unattached, attach on grasp" state;
+       the attach_topic here is then used for re-attaching, which is the
+       explicitly-supported, intended use of this plugin's design.
+
+       Only wired for 2F-85 here; Hand-E has no verified equivalent tip frame
+       yet, so this hasn't been added to that variant. -->
+  <xacro:macro name="cube_detachable_joint" params="cube_name">
+    <gazebo>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
+        <child_model>${cube_name}</child_model>
+        <child_link>link</child_link>
+        <detach_topic>/${cube_name}/detach</detach_topic>
+        <attach_topic>/${cube_name}/attach</attach_topic>
+        <output_topic>/${cube_name}/state</output_topic>
+      </plugin>
+    </gazebo>
+  </xacro:macro>
+  <xacro:cube_detachable_joint cube_name="cube_0"/>
+  <xacro:cube_detachable_joint cube_name="cube_1"/>
+  <xacro:cube_detachable_joint cube_name="cube_2"/>
+
+</robot>

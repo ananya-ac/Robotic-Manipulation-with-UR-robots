@@ -1,0 +1,414 @@
+<?xml version="1.0"?>
+<!--
+  UR + Robotiq 2F-85 description for mujoco_ros2_control (ros-controls/mujoco_ros2_control).
+  MuJoCo counterpart of ur_gripper_2f85_gz.urdf.xacro - same geometry, same interface
+  declarations (position for the arm, position for the gripper knuckle). Only the
+  <ros2_control> hardware plugin changes, plus a <mujoco_inputs> block supplying the
+  MJCF actuators/equality-constraints/sensors that mujoco_ros2_control's URDF->MJCF
+  conversion (make_mjcf_from_robot_description.py) needs but can't infer on its own.
+
+  The 2F-85 has ONE actuated joint (robotiq_85_left_knuckle_joint) and 5 URDF <mimic>
+  joints. Unlike Gazebo (which needed the non-default bullet-featherstone physics
+  engine for mimic support), MuJoCo enforces the mimic relationship natively via
+  <equality><joint .../> constraints - see the <equality> block below, one per mimic
+  joint, with polycoef/multiplier values read directly from robotiq_2f_85_macro.urdf.xacro.
+
+  Arm joints use MuJoCo-native <position> actuators (MuJoCo's own built-in P+D servo,
+  force = kp*(ctrl-qpos) - kv*qvel, computed every physics step - no external PID code, no
+  YAML gains file, nothing running in the ros2_control hardware-interface loop). Menagerie's
+  own universal_robots_ur5e model uses the exact same actuator type (confirmed from its
+  source: <general gaintype="fixed" biastype="affine" .../>, mathematically identical to
+  <position kp kv>) as a starting point, but its kp/kv were tuned for a BARE wrist - ours
+  carries the full 2F-85+D435 assembly cantilevered off wrist_3, which saturates Menagerie's
+  kv=100 into a sustained torque-limit-cycle (confirmed empirically: actuator_force pinned
+  at exactly the joint's actuatorfrcrange bound, flipping sign every single physics step).
+  Retuned per-joint against this robot's actual combined multi-joint dynamics instead (see
+  the actuator block's own comment for the values and method).
+
+  A <position> actuator alone (pure P+D, no integral) has an inherent nonzero steady-state
+  error under any sustained load - confirmed this was really happening (0.0001-0.08 rad
+  residual across the 6 joints, holding a static pose against gravity), and it matters here
+  specifically because recorded demonstration trajectories for diffusion-policy training
+  need the realized pose to actually match the commanded one. Rather than add an external
+  integral term (tried first: MujocoSystemInterface + control_toolbox::PidROS via a
+  pids_config_file - works, but reintroduces classic PID problems: anti-windup strategy
+  bugs, a "must define PID gains for every declared command interface, not just the one you
+  use" requirement, and real overshoot under actual coupled multi-joint moves that the
+  isolated per-joint tuning didn't predict), gravity is cancelled directly at the physics
+  level instead via MuJoCo's per-body gravcomp attribute (see the processed_inputs section
+  below) - removing the disturbance a controller would otherwise need an integrator to
+  chase, rather than fighting it after the fact. Verified in isolation: combined home<->reach
+  moves settle in 0.12-0.58s with <3.5% overshoot and machine-precision (1e-12 to 1e-15 rad)
+  final tracking, actuator force exactly 0.0 once settled (no residual sway/chatter).
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+
+  <xacro:arg name="name" default="ur5e"/>
+  <xacro:arg name="ur_type" default="ur5e"/>
+  <xacro:arg name="tf_prefix" default=""/>
+  <xacro:arg name="mujoco_model_path" default=""/>
+  <xacro:arg name="headless" default="false"/>
+  <!-- Set to false by composing files (e.g. ur5e_2f85_camera_mujoco.urdf.xacro) that need
+       to add their own sensors into the SAME <mujoco_inputs>/<ros2_control> blocks below
+       (mujoco_ros2_control ties one whole simulation to one hardware component, so a second
+       independent <ros2_control> block for e.g. a camera would spin up a SECOND MuJoCo
+       instance, not share this one - not just a style choice, a real constraint). Those
+       composing files call the ur_gripper_2f85_mujoco_extras macro directly instead, passing
+       their own sensors through its *extra_processed_inputs/*extra_ros2_control_sensors block
+       params, and must set standalone:=false on the xacro command line to suppress the
+       automatic invocation below (otherwise both would fire, producing two conflicting
+       <mujoco_inputs>/<ros2_control> blocks in one URDF). -->
+  <xacro:arg name="standalone" default="true"/>
+
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+  <xacro:include filename="$(find ur_description)/urdf/inc/ur_joint_control.xacro"/>
+  <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_85_macro.urdf.xacro"/>
+  <xacro:include filename="$(find robotiq_description)/urdf/ur_to_robotiq_adapter.urdf.xacro"/>
+
+  <link name="world"/>
+  <xacro:ur_robot
+    name="$(arg name)" tf_prefix="$(arg tf_prefix)" parent="world"
+    joint_limits_parameters_file="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"
+    kinematics_parameters_file="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"
+    physical_parameters_file="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"
+    visual_parameters_file="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"
+    safety_limits="false" safety_pos_margin="0.15" safety_k_position="20" force_abs_paths="true">
+    <origin xyz="0 0 0" rpy="0 0 1.5707"/>
+  </xacro:ur_robot>
+
+  <!-- mount the gripper on the UR tool flange -->
+  <xacro:ur_to_robotiq prefix="$(arg tf_prefix)" connected_to="$(arg tf_prefix)tool0" rotation="0.0"/>
+  <xacro:robotiq_gripper name="RobotiqGripper" prefix="$(arg tf_prefix)"
+                         parent="$(arg tf_prefix)gripper_mount_link" include_ros2_control="false">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:robotiq_gripper>
+
+  <!-- TCP frame for compliance / ur_control clients (ee_link='gripper_tip_link').
+       Offset from tool0 through the ur_to_robotiq adapter + 2F-85 body to the open
+       fingertip center (~172 mm along tool Z). -->
+  <link name="$(arg tf_prefix)gripper_tip_link"/>
+  <joint name="$(arg tf_prefix)gripper_tip_joint" type="fixed">
+    <origin xyz="0 0 0.172" rpy="0 0 0"/>
+    <parent link="$(arg tf_prefix)tool0"/>
+    <child link="$(arg tf_prefix)gripper_tip_link"/>
+  </joint>
+
+  <!-- Note: xacro:ur_robot (ur_macro.xacro) already defines a fixed "ft_frame" link off
+       wrist_3_link. mujoco_ros2_control's URDF->MJCF conversion auto-adds every URDF link
+       as a named MJCF <site> (see add_links_as_sites in urdf_to_mujoco_utils.py), so that
+       existing link is reused below as the FT sensor's site - no need to add our own. -->
+
+  <!-- MJCF actuators / mimic-joint equality constraints / FT sensor / ros2_control system,
+       wrapped in one macro (not left at top level) so composing files can inject their own
+       sensors into the SAME <mujoco_inputs>/<ros2_control> blocks, rather than emitting
+       separate blocks of their own - see the standalone arg comment above for why that
+       distinction matters for MuJoCo specifically.
+
+       Extension is via the two xacro:property blocks below (extra_processed_inputs,
+       extra_ros2_control_sensors), NOT macro block params (*foo): block params insert their
+       calling-site wrapper tag verbatim (confirmed empirically), which would land as e.g.
+       <processed_inputs><extra_processed_inputs><camera .../></extra_processed_inputs></processed_inputs>
+       - an extra wrapper level that breaks mujoco_ros2_control's parser, which matches direct
+       children of <processed_inputs> by exact tag name ("camera", "modify_element", etc.) and
+       silently ignores anything else, including an unrecognized wrapper tag. Property blocks
+       insert their content directly with no wrapper (also confirmed empirically), which is
+       what's needed here. Composing files must set both properties BEFORE their
+       <xacro:include> of this file (so their values are in place before the standalone guard
+       below runs) and pass standalone:=false on the xacro command line (so that guard doesn't
+       fire and overwrite them with empty defaults), then call this macro themselves. Empty
+       defaults for standalone use are declared right before the macro invocation at the
+       bottom of this file, inside the standalone guard - not here - specifically so they
+       don't unconditionally clobber a composing file's earlier override (verified empirically
+       that an unconditional declaration here would run after, and reset, any override a
+       composing file made before its <xacro:include> of this file). -->
+
+  <xacro:macro name="ur_gripper_2f85_mujoco_extras" params="tf_prefix mujoco_model_path headless">
+
+  <!-- MJCF actuators / mimic-joint equality constraints / FT sensor. Copied verbatim into
+       the generated MJCF by make_mjcf_from_robot_description.py; stripped out (like
+       <ros2_control>) before the remaining URDF is parsed by anything else. -->
+  <mujoco_inputs>
+    <raw_inputs>
+      <!-- Referenced by the generated visual/collision geoms; without this the MJCF
+           fails to compile standalone with "unknown default class name". -->
+      <default>
+        <default class="visual">
+          <geom group="2" type="mesh" contype="0" conaffinity="0"/>
+        </default>
+        <default class="collision">
+          <geom group="3" type="mesh"/>
+        </default>
+      </default>
+
+      <!-- Self-collision exclusions, ported from ur_gripper_sim_moveit_config's SRDF
+           <disable_collisions> list (queried live: `ros2 param get /move_group
+           robot_description_semantic`), translated from URDF link names to MuJoCo's
+           POST-FUSION body names (fixed-jointed links merge into their parent body -
+           tool0/flange/ur_to_robotiq_link/gripper_mount_link/robotiq_85_base_link all fuse
+           into wrist_3_link; robotiq_85_left/right_finger_link fuse into their respective
+           _knuckle_link), deduplicated (many SRDF pairs collapse onto the same body pair
+           once fused, or onto a body colliding with itself, meaningless post-fusion).
+           SRDF disable_collisions is a MoveIt-only ACM for planning/collision-checking -
+           it has NO effect on MuJoCo's own physics engine, which computes real contact
+           forces for these pairs regardless. Confirmed empirically that this actually
+           matters, not just a theoretical concern: world<->shoulder_link showed a real,
+           persistent contact (dist=-0.0005) that was silently CANCELING the shoulder_pan
+           actuator's (already actuatorfrcrange-clamped) torque via qfrc_constraint,
+           leaving qpos completely unable to move despite a valid, claimed position command
+           - the direct cause of "MoveIt plans succeed but the arm doesn't reach the goal".
+           Also found real gripper-internal contacts (finger_tip<->inner_knuckle, both
+           sides, penetration up to -0.012) - plausibly part of why some mimic joints
+           showed steady-state tracking deviation under load (see that finding above). -->
+      <contact>
+        <exclude body1="${tf_prefix}world" body2="${tf_prefix}shoulder_link"/>
+        <exclude body1="${tf_prefix}shoulder_link" body2="${tf_prefix}upper_arm_link"/>
+        <exclude body1="${tf_prefix}upper_arm_link" body2="${tf_prefix}forearm_link"/>
+        <exclude body1="${tf_prefix}forearm_link" body2="${tf_prefix}wrist_1_link"/>
+        <exclude body1="${tf_prefix}wrist_1_link" body2="${tf_prefix}wrist_2_link"/>
+        <exclude body1="${tf_prefix}wrist_2_link" body2="${tf_prefix}wrist_3_link"/>
+        <exclude body1="${tf_prefix}wrist_1_link" body2="${tf_prefix}wrist_3_link"/>
+        <exclude body1="${tf_prefix}wrist_3_link" body2="${tf_prefix}robotiq_85_left_knuckle_link"/>
+        <exclude body1="${tf_prefix}wrist_3_link" body2="${tf_prefix}robotiq_85_left_finger_tip_link"/>
+        <exclude body1="${tf_prefix}wrist_3_link" body2="${tf_prefix}robotiq_85_left_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}wrist_3_link" body2="${tf_prefix}robotiq_85_right_knuckle_link"/>
+        <exclude body1="${tf_prefix}wrist_3_link" body2="${tf_prefix}robotiq_85_right_finger_tip_link"/>
+        <exclude body1="${tf_prefix}wrist_3_link" body2="${tf_prefix}robotiq_85_right_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_knuckle_link" body2="${tf_prefix}robotiq_85_left_finger_tip_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_knuckle_link" body2="${tf_prefix}robotiq_85_left_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_finger_tip_link" body2="${tf_prefix}robotiq_85_left_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_right_knuckle_link" body2="${tf_prefix}robotiq_85_right_finger_tip_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_right_knuckle_link" body2="${tf_prefix}robotiq_85_right_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_right_finger_tip_link" body2="${tf_prefix}robotiq_85_right_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_knuckle_link" body2="${tf_prefix}robotiq_85_right_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_knuckle_link" body2="${tf_prefix}robotiq_85_right_finger_tip_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_knuckle_link" body2="${tf_prefix}robotiq_85_right_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_finger_tip_link" body2="${tf_prefix}robotiq_85_right_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_finger_tip_link" body2="${tf_prefix}robotiq_85_right_finger_tip_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_finger_tip_link" body2="${tf_prefix}robotiq_85_right_inner_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_inner_knuckle_link" body2="${tf_prefix}robotiq_85_right_knuckle_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_inner_knuckle_link" body2="${tf_prefix}robotiq_85_right_finger_tip_link"/>
+        <exclude body1="${tf_prefix}robotiq_85_left_inner_knuckle_link" body2="${tf_prefix}robotiq_85_right_inner_knuckle_link"/>
+      </contact>
+
+      <!-- MuJoCo-native <position> actuators (kp/kv, forcerange matching each joint's real
+           actuatorfrcrange). Retuned per-joint from Menagerie's stock values against this
+           robot's actual combined multi-joint dynamics (a Gauss-Seidel coordinate-descent
+           search: tune one joint's kp/kv at a time against a realistic simultaneous 6-joint
+           move, using the other joints' current-best gains, iterated to convergence) rather
+           than isolated single-joint step tests, which were found to badly underestimate real
+           coupling (an isolated-joint search that looked fine produced 40-55% overshoot once
+           all 6 joints moved together for real). Paired with gravcomp="1" on every body
+           (processed_inputs below) so no integral term is needed for exact tracking - see
+           this file's header comment for the full reasoning and the control_toolbox/PID
+           alternative this replaced. gear left at MuJoCo's default (1): ctrl is a position
+           target in joint radians, not a torque. -->
+      <actuator>
+        <position name="${tf_prefix}shoulder_pan_joint" joint="${tf_prefix}shoulder_pan_joint" kp="1000" kv="100" forcerange="-150 150"/>
+        <position name="${tf_prefix}shoulder_lift_joint" joint="${tf_prefix}shoulder_lift_joint" kp="800" kv="100" forcerange="-150 150"/>
+        <position name="${tf_prefix}elbow_joint" joint="${tf_prefix}elbow_joint" kp="4000" kv="80" forcerange="-150 150"/>
+        <position name="${tf_prefix}wrist_1_joint" joint="${tf_prefix}wrist_1_joint" kp="1000" kv="40" forcerange="-28 28"/>
+        <position name="${tf_prefix}wrist_2_joint" joint="${tf_prefix}wrist_2_joint" kp="1000" kv="40" forcerange="-28 28"/>
+        <position name="${tf_prefix}wrist_3_joint" joint="${tf_prefix}wrist_3_joint" kp="625" kv="15" forcerange="-28 28"/>
+        <position name="${tf_prefix}robotiq_85_left_knuckle_joint" joint="${tf_prefix}robotiq_85_left_knuckle_joint" kp="50" kv="7" ctrlrange="0 0.8"/>
+      </actuator>
+
+      <!-- Fixes a real startup bug (confirmed live + reproduced in isolation): without this,
+           MujocoSystemInterface's initialize_initial_positions sets qpos to the values below
+           (from the ur_joint_control_description call's initial_positions dict) at startup,
+           but MuJoCo's own ctrl array (each <position> actuator's TARGET) defaults to all
+           zeros regardless - a huge initial position error (e.g. shoulder_lift: qpos=-1.57,
+           ctrl=0.0) that the actuators immediately try to correct, snapping the whole arm
+           toward the zero pose before any ros2_control controller has even activated to give
+           it a sane hold target. Symptom: the arm visibly "falls" into the table the instant
+           the sim starts, then jitters continuously (fighting contact once it lands there
+           mid-correction) - confirmed by reproducing the exact same drift in an isolated
+           mj_step script with qpos set to home and ctrl left at MuJoCo's default zero.
+           A <key> setting BOTH qpos and ctrl to the same home values closes that gap entirely
+           - initial_keyframe below tells the hardware interface to load it before the first
+           physics step. Partial qpos here is fine - MuJoCo pads anything not listed (e.g. a
+           composing file's cube free-joints) with the model's own default pose (confirmed
+           empirically), so this only needs to cover the robot's own 12 DOF. ctrl is a
+           position target for every actuator here (arm AND gripper knuckle alike), matching
+           qpos exactly, since all 7 are <position> actuators. -->
+      <keyframe>
+        <key name="home"
+             qpos="1.57 -1.57 1.26 -1.57 -1.57 0.0  0.0 0.0 0.0 0.0 0.0 0.0"
+             ctrl="1.57 -1.57 1.26 -1.57 -1.57 0.0  0.0"/>
+      </keyframe>
+
+      <!-- No explicit <equality> block needed: MuJoCo's native URDF importer auto-converts
+           each <mimic> joint in robotiq_2f_85_macro.urdf.xacro into an equality constraint
+           directly (verified empirically - produces exactly the 5 expected constraints with
+           the correct +-1 multipliers). An explicit block here would just duplicate them. -->
+
+      <!-- Paired force/torque sensor at ft_frame. Names MUST be <FTS>_force / <FTS>_torque
+           to match the ros2_control <sensor name="<FTS>_fts"> convention below (see
+           mujoco_system_interface.hpp's register_sensors doc comment). -->
+      <sensor>
+        <force name="${tf_prefix}tcp_force" site="${tf_prefix}ft_frame"/>
+        <torque name="${tf_prefix}tcp_torque" site="${tf_prefix}ft_frame"/>
+      </sensor>
+    </raw_inputs>
+
+    <!-- The 5 non-actuated gripper joints have no URDF <limit> (they're type="continuous" in
+         robotiq_2f_85_macro.urdf.xacro) and the vendor macro specifies no damping on any of
+         the 6 gripper joints. Empirically (direct mj_step simulation, no ROS), that combination
+         is unstable: an unbounded mimic joint can drift to a different, still mimic-equality-
+         satisfying configuration multiple radians away under an actuator step (runaway
+         divergence), and even once bounded by range, near-zero damping leaves the coupled
+         mechanism oscillating indefinitely instead of settling.
+         range: mathematically derived, not guessed - mirrors the driven knuckle's own
+         vendor-specified 0-0.8 rad <limit>, sign-flipped per each joint's exact mimic
+         multiplier (read from robotiq_2f_85_macro.urdf.xacro; see the equality constraint
+         comment above).
+         damping/armature: sourced from MuJoCo Menagerie's robotiq_2f85 model
+         (google-deepmind/mujoco_menagerie), not guessed - "driver" class (damping="0.1"
+         armature="0.005", verbatim) applied to the one actuated joint. The 5 passive ones use
+         armature="0.001" (shared verbatim across Menagerie's "follower"/"coupler"/
+         "spring_link" classes - consistent there) and damping="0.00125" - CORRECTION: that
+         damping value is only actually specified on Menagerie's "spring_link" class
+         (which also has stiffness="0.05" springref="2.62", a return spring we don't include);
+         "follower" and "coupler" both have NO damping attribute (defaults to 0) in Menagerie.
+         An earlier version of this comment mislabeled the source as "follower class" for all
+         5. Menagerie's mechanism has 4 distinct joint roles (driver/follower/coupler/
+         spring_link) across real coupler/spring bodies forming an actual four-bar linkage;
+         ours is a simpler mimic-joint equality with no coupler geometry and no 1:1 mapping to
+         those 4 roles, so applying spring_link's damping uniformly to all 5 passive joints is
+         an approximation, not a precise transfer - flagged here rather than re-labeled as
+         something it isn't. Empirically this still settles the mechanism cleanly within ~1s
+         with the driven joint landing within ~1% of its target (0.603 vs 0.6 commanded) - a
+         huge improvement over the original unstable/guessed values, verified before this
+         correction and unaffected by it (no numeric values changed here, just the sourcing
+         claim).
+         Some joints still show ~15-29% steady-state deviation from their exact mimic ratio
+         under load (right_knuckle, left/right_inner_knuckle); likely the default equality
+         solref/solimp being soft relative to the actuator's holding force. Not yet fixed -
+         URDF <mimic> can't express solref/solimp directly, so the next lever is probably an
+         explicit <equality> block with tighter solref/solimp (removed earlier as redundant
+         with MuJoCo's native <mimic> auto-conversion; may need to reintroduce deliberately). -->
+    <processed_inputs>
+      <!-- armature=0.1 on all 6 arm joints, matching MuJoCo Menagerie's universal_robots_ur5e
+           model exactly (it applies this uniformly, not just to specific joints). Found
+           necessary the hard way: without it, wrist_3_joint oscillated wildly and
+           continuously (confirmed via a 10000-step/18s mj_step test: roughly -0.85 to +0.22
+           rad, never damping out) even with its kp/kv unchanged from the working Menagerie
+           values - neither raising kv (tried 100->300, made it WORSE) nor raising both kp/kv
+           to the shoulder-class values (2000/400, still oscillated) fixed it, which is what
+           pointed away from "needs more actuator authority" and toward "needs the armature
+           Menagerie always pairs with these gains but this file omitted for the arm" (it was
+           already applied to the gripper joints above, just missed for the arm). Root cause
+           is believable given wrist_3_joint now carries the entire 2F-85+D435 assembly
+           cantilevered off-axis - a much larger, better-armed-for-instability effective load
+           than Menagerie's bare wrist ever had to hold. Re-tested with only wrist_3_joint
+           patched to armature=0.1 (kp/kv left at the original 500/100): oscillation
+           completely gone, dead stable for the full 18s test. Applied to all 6 for
+           consistency with Menagerie's own uniform usage, not just the one joint that
+           happened to show symptoms first - the others may be nearer the same edge without
+           yet failing outright. -->
+      <modify_element type="joint" name="${tf_prefix}shoulder_pan_joint" armature="0.1"/>
+      <modify_element type="joint" name="${tf_prefix}shoulder_lift_joint" armature="0.1"/>
+      <modify_element type="joint" name="${tf_prefix}elbow_joint" armature="0.1"/>
+      <modify_element type="joint" name="${tf_prefix}wrist_1_joint" armature="0.1"/>
+      <modify_element type="joint" name="${tf_prefix}wrist_2_joint" armature="0.1"/>
+      <modify_element type="joint" name="${tf_prefix}wrist_3_joint" armature="0.1"/>
+      <modify_element type="joint" name="${tf_prefix}robotiq_85_left_knuckle_joint" damping="0.1" armature="0.005"/>
+      <modify_element type="joint" name="${tf_prefix}robotiq_85_right_knuckle_joint" damping="0.00125" armature="0.001"/>
+      <modify_element type="joint" name="${tf_prefix}robotiq_85_left_inner_knuckle_joint" range="0 0.8" damping="0.00125" armature="0.001"/>
+      <modify_element type="joint" name="${tf_prefix}robotiq_85_right_inner_knuckle_joint" range="-0.8 0" damping="0.00125" armature="0.001"/>
+      <modify_element type="joint" name="${tf_prefix}robotiq_85_left_finger_tip_joint" range="-0.8 0" damping="0.00125" armature="0.001"/>
+      <modify_element type="joint" name="${tf_prefix}robotiq_85_right_finger_tip_joint" range="0 0.8" damping="0.00125" armature="0.001"/>
+
+      <!-- gravcomp="1" on every robot body: cancels that body's own weight directly in
+           MuJoCo's physics engine (a real solver feature, not a control hack), so the
+           <position> actuators above never see a sustained gravity-load error to hold
+           against - eliminating the need for an integral term entirely (see this file's
+           header comment). Applied to all 12 post-fusion bodies (arm links + gripper links;
+           wrist_3_link also carries the fused ur_to_robotiq adapter + gripper base + D435
+           camera mass, all cancelled together since they move as one rigid body), not just
+           the 6 arm links - the gripper's own weight also loads wrist_2/wrist_3 if left
+           uncompensated. type="body" modify_element matched by name, same generic mechanism
+           already used for type="joint" above (confirmed via urdf_to_mujoco_utils.py's
+           add_modifiers: matches worldbody_element.getElementsByTagName(type) by name
+           attribute for any non-"geom" type, not just "joint"). -->
+      <modify_element type="body" name="${tf_prefix}shoulder_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}upper_arm_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}forearm_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}wrist_1_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}wrist_2_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}wrist_3_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}robotiq_85_left_knuckle_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}robotiq_85_left_finger_tip_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}robotiq_85_right_knuckle_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}robotiq_85_right_finger_tip_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}robotiq_85_left_inner_knuckle_link" gravcomp="1"/>
+      <modify_element type="body" name="${tf_prefix}robotiq_85_right_inner_knuckle_link" gravcomp="1"/>
+      <xacro:insert_block name="extra_processed_inputs"/>
+    </processed_inputs>
+  </mujoco_inputs>
+
+  <!-- single mujoco_ros2_control system: arm joints + the actuated gripper knuckle (+ any
+       extra sensors, e.g. camera, passed in via extra_ros2_control_sensors by a composing
+       file). The 5 gripper mimic joints are enforced by the MJCF <equality> block above; they
+       get state interfaces only (no command interface), same as the Gazebo variant. -->
+  <ros2_control name="MujocoSystem" type="system">
+    <hardware>
+      <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+      <!-- Points at a pre-generated MJCF (e.g. from make_mjcf_from_robot_description.py).
+           Left blank by default; the real launch file will eventually generate this at
+           launch time via the robot_description_to_mjcf topic mechanism instead. -->
+      <xacro:unless value="${mujoco_model_path == ''}">
+        <param name="mujoco_model">${mujoco_model_path}</param>
+      </xacro:unless>
+      <param name="headless">${headless}</param>
+      <!-- Loads the "home" <key> above (qpos AND ctrl together) before the first physics
+           step, so the position actuators never see a large initial error against a
+           default-zero ctrl - see that keyframe's own comment for the startup-fall bug this
+           closes. -->
+      <param name="initial_keyframe">home</param>
+    </hardware>
+    <xacro:ur_joint_control_description tf_prefix="${tf_prefix}"
+      initial_positions="${dict(shoulder_pan_joint=1.57, shoulder_lift_joint=-1.57, elbow_joint=1.26, wrist_1_joint=-1.57, wrist_2_joint=-1.57, wrist_3_joint=0.0)}"/>
+    <!-- Wrist force-torque sensor. Mirrors the real ur_robot_driver tcp_fts_sensor
+         (force.x..torque.z). Registration requires the explicit mujoco_type=fts param
+         (MUJOCO_TYPE_FTS in mujoco_system_interface.hpp) - the "_fts" name suffix seen in
+         the header's doc comment is just that example's naming choice, not what triggers
+         registration. mujoco_sensor_name pins the MJCF sensor base explicitly to "tcp",
+         matching the tcp_force/tcp_torque sensors declared in mujoco_inputs above. -->
+    <sensor name="${tf_prefix}tcp_fts">
+      <param name="mujoco_type">fts</param>
+      <param name="mujoco_sensor_name">${tf_prefix}tcp</param>
+      <state_interface name="force.x"/>
+      <state_interface name="force.y"/>
+      <state_interface name="force.z"/>
+      <state_interface name="torque.x"/>
+      <state_interface name="torque.y"/>
+      <state_interface name="torque.z"/>
+      <param name="frame_id">${tf_prefix}wrist_3_link</param>
+    </sensor>
+    <joint name="${tf_prefix}robotiq_85_left_knuckle_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="${tf_prefix}robotiq_85_right_knuckle_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="${tf_prefix}robotiq_85_left_inner_knuckle_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="${tf_prefix}robotiq_85_right_inner_knuckle_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="${tf_prefix}robotiq_85_left_finger_tip_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="${tf_prefix}robotiq_85_right_finger_tip_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <xacro:insert_block name="extra_ros2_control_sensors"/>
+  </ros2_control>
+
+  </xacro:macro>
+
+  <!-- Standalone usage (direct `xacro ur_gripper_2f85_mujoco.urdf.xacro`, no camera/extra
+       sensors): declare both extension properties empty, then invoke the macro. Composing
+       files set standalone:=false (suppressing this whole block, so it can't clobber their
+       own earlier property overrides) and call ur_gripper_2f85_mujoco_extras themselves
+       instead - see the standalone arg comment above. -->
+  <xacro:if value="$(arg standalone)">
+    <xacro:property name="extra_processed_inputs"></xacro:property>
+    <xacro:property name="extra_ros2_control_sensors"></xacro:property>
+    <xacro:ur_gripper_2f85_mujoco_extras tf_prefix="$(arg tf_prefix)" mujoco_model_path="$(arg mujoco_model_path)" headless="$(arg headless)"/>
+  </xacro:if>
+
+</robot>

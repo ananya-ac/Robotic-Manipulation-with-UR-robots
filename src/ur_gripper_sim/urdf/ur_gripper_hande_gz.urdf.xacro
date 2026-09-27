@@ -1,0 +1,101 @@
+<?xml version="1.0"?>
+<!--
+  UR + Robotiq Hand-E description for gz-sim (Harmonic) with gz_ros2_control.
+
+  Extends the upstream ur_simulation_gz ur_gz.urdf.xacro pattern with the
+  gripper geometry from the ROS 1 ur_gripper_gazebo package. The arm
+  ros2_control block comes from the vendored ur_simulation_gz xacro macro.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+
+  <xacro:arg name="name" default="ur"/>
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+  <xacro:include filename="$(find ur_gripper_sim)/urdf/inc/ur_gripper_hande.ros2_control.xacro"/>
+
+  <xacro:arg name="ur_type" default="ur3e"/>
+  <xacro:arg name="tf_prefix" default=""/>
+  <xacro:arg name="joint_limit_params"
+             default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
+  <xacro:arg name="kinematics_params"
+             default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>
+  <xacro:arg name="physical_params"
+             default="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"/>
+  <xacro:arg name="visual_params"
+             default="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"/>
+  <xacro:arg name="transmission_hw_interface" default=""/>
+  <xacro:arg name="safety_limits" default="false"/>
+  <xacro:arg name="safety_pos_margin" default="0.15"/>
+  <xacro:arg name="safety_k_position" default="20"/>
+  <xacro:arg name="simulation_controllers" default=""/>
+  <xacro:arg name="ros_namespace" default=""/>
+
+  <!-- Spawn pose defaults match ur_gripper_gazebo/launch/ur_gripper_hande_cubes.launch -->
+  <xacro:arg name="spawn_x" default="0.0"/>
+  <xacro:arg name="spawn_y" default="0.0"/>
+  <xacro:arg name="spawn_z" default="0.0"/>
+  <xacro:arg name="spawn_yaw" default="1.5707"/>
+
+  <link name="world"/>
+
+  <xacro:ur_robot
+    name="$(arg name)"
+    tf_prefix="$(arg tf_prefix)"
+    parent="world"
+    joint_limits_parameters_file="$(arg joint_limit_params)"
+    kinematics_parameters_file="$(arg kinematics_params)"
+    physical_parameters_file="$(arg physical_params)"
+    visual_parameters_file="$(arg visual_params)"
+    safety_limits="$(arg safety_limits)"
+    safety_pos_margin="$(arg safety_pos_margin)"
+    safety_k_position="$(arg safety_k_position)"
+    force_abs_paths="true">
+    <origin xyz="$(arg spawn_x) $(arg spawn_y) $(arg spawn_z)" rpy="0 0 $(arg spawn_yaw)"/>
+  </xacro:ur_robot>
+
+  <xacro:include filename="$(find ur_gripper_sim)/urdf/inc/gripper_hande.xacro"/>
+
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(arg simulation_controllers)</parameters>
+      <ros>
+        <namespace>$(arg ros_namespace)</namespace>
+      </ros>
+    </plugin>
+    <!-- gz force_torque sensors are inert without this system (stock empty.sdf does
+         not load it). It scans the world for force_torque sensors, computes each
+         joint's reaction wrench, and publishes it on the sensor's gz topic, which
+         gz_ros2_control auto-discovers and exposes as the tcp_fts_sensor interfaces. -->
+    <plugin filename="gz-sim-forcetorque-system" name="gz::sim::systems::ForceTorque"/>
+  </gazebo>
+
+  <!-- Wrist force-torque sensor. Attached to wrist_3_joint (a real revolute joint, so
+       bullet-featherstone always models it as a constraint and reports its reaction
+       wrench — a fixed joint at ft_frame would be lumped away). Reported in the child
+       (wrist_3_link) frame; the broadcaster stamps frame_id=wrist_3_link and downstream
+       consumers transform via TF. Name MUST match the <sensor> in the ros2_control xacro. -->
+  <gazebo reference="$(arg tf_prefix)wrist_3_joint">
+    <sensor name="$(arg tf_prefix)tcp_fts_sensor" type="force_torque">
+      <always_on>true</always_on>
+      <update_rate>500</update_rate>
+      <force_torque>
+        <frame>child</frame>
+        <measure_direction>child_to_parent</measure_direction>
+      </force_torque>
+    </sensor>
+  </gazebo>
+
+  <!-- Home pose from ur_gripper_hande_cubes.launch spawn joint values -->
+  <xacro:ur_gripper_hande_ros2_control
+    name="$(arg name)"
+    tf_prefix="$(arg tf_prefix)"
+    transmission_hw_interface="$(arg transmission_hw_interface)"
+    initial_positions="${dict(
+      shoulder_pan_joint=1.57,
+      shoulder_lift_joint=-1.57,
+      elbow_joint=1.26,
+      wrist_1_joint=-1.57,
+      wrist_2_joint=-1.57,
+      wrist_3_joint=0.0)}"
+    finger_initial_position="0.002"/>
+
+</robot>

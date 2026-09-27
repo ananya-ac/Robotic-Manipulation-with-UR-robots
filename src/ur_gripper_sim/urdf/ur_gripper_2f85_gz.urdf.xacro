@@ -1,0 +1,114 @@
+<?xml version="1.0"?>
+<!--
+  UR + Robotiq 2F-85 description for gz-sim (Harmonic) with gz_ros2_control.
+
+  Uses PickNik's vendor robotiq_description (apt: ros-jazzy-robotiq-description) for the
+  2F-85 GEOMETRY only (include_ros2_control:=false) plus its ur_to_robotiq adapter, and
+  supplies a gz_ros2_control system here. The 2F-85 has ONE actuated joint
+  (robotiq_85_left_knuckle_joint) and 5 URDF <mimic> joints.
+
+  IMPORTANT: launch gz with the bullet-featherstone physics engine (see the launch file's
+  gz_args). The default DART engine does NOT support mimic constraints, so the 2F-85
+  four-bar linkage would not articulate.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+
+  <xacro:arg name="name" default="ur5e"/>
+  <xacro:arg name="ur_type" default="ur5e"/>
+  <xacro:arg name="tf_prefix" default=""/>
+  <xacro:arg name="simulation_controllers" default=""/>
+
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+  <xacro:include filename="$(find ur_description)/urdf/inc/ur_joint_control.xacro"/>
+  <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_85_macro.urdf.xacro"/>
+  <xacro:include filename="$(find robotiq_description)/urdf/ur_to_robotiq_adapter.urdf.xacro"/>
+
+  <link name="world"/>
+  <xacro:ur_robot
+    name="$(arg name)" tf_prefix="$(arg tf_prefix)" parent="world"
+    joint_limits_parameters_file="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"
+    kinematics_parameters_file="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"
+    physical_parameters_file="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"
+    visual_parameters_file="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"
+    safety_limits="false" safety_pos_margin="0.15" safety_k_position="20" force_abs_paths="true">
+    <origin xyz="0 0 0" rpy="0 0 1.5707"/>
+  </xacro:ur_robot>
+
+  <!-- mount the gripper on the UR tool flange -->
+  <xacro:ur_to_robotiq prefix="$(arg tf_prefix)" connected_to="$(arg tf_prefix)tool0" rotation="0.0"/>
+  <xacro:robotiq_gripper name="RobotiqGripper" prefix="$(arg tf_prefix)"
+                         parent="$(arg tf_prefix)gripper_mount_link" include_ros2_control="false">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:robotiq_gripper>
+
+  <!-- TCP frame for compliance / ur_control clients (ee_link='gripper_tip_link').
+       Offset from tool0 through the ur_to_robotiq adapter + 2F-85 body to the open
+       fingertip center (~172 mm along tool Z). -->
+  <link name="$(arg tf_prefix)gripper_tip_link"/>
+  <joint name="$(arg tf_prefix)gripper_tip_joint" type="fixed">
+    <origin xyz="0 0 0.172" rpy="0 0 0"/>
+    <parent link="$(arg tf_prefix)tool0"/>
+    <child link="$(arg tf_prefix)gripper_tip_link"/>
+  </joint>
+
+  <!-- single gz_ros2_control system: arm joints + the actuated gripper knuckle.
+       The 5 gripper mimic joints are enforced by gz (bullet-featherstone) from their
+       URDF <mimic> tags; they get state interfaces only (no command interface). -->
+  <ros2_control name="GazeboSimSystem" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+    <xacro:ur_joint_control_description tf_prefix="$(arg tf_prefix)"
+      initial_positions="${dict(shoulder_pan_joint=1.57, shoulder_lift_joint=-1.57, elbow_joint=1.26, wrist_1_joint=-1.57, wrist_2_joint=-1.57, wrist_3_joint=0.0)}"/>
+    <!-- Wrist force-torque sensor. Mirrors the real ur_robot_driver tcp_fts_sensor
+         (force.x..torque.z). gz_ros2_control backs these state interfaces from the gz
+         force_torque sensor of the SAME name, defined on wrist_3_joint below. The
+         force_torque_sensor_broadcaster reads it and publishes /wrench. -->
+    <sensor name="$(arg tf_prefix)tcp_fts_sensor">
+      <state_interface name="force.x"/>
+      <state_interface name="force.y"/>
+      <state_interface name="force.z"/>
+      <state_interface name="torque.x"/>
+      <state_interface name="torque.y"/>
+      <state_interface name="torque.z"/>
+    </sensor>
+    <joint name="$(arg tf_prefix)robotiq_85_left_knuckle_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="$(arg tf_prefix)robotiq_85_right_knuckle_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="$(arg tf_prefix)robotiq_85_left_inner_knuckle_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="$(arg tf_prefix)robotiq_85_right_inner_knuckle_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="$(arg tf_prefix)robotiq_85_left_finger_tip_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+    <joint name="$(arg tf_prefix)robotiq_85_right_finger_tip_joint"><state_interface name="position"/><state_interface name="velocity"/></joint>
+  </ros2_control>
+
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(arg simulation_controllers)</parameters>
+    </plugin>
+    <!-- gz force_torque sensors are inert without this system (stock empty.sdf does not
+         load it). It scans the world for force_torque sensors, computes each joint's
+         reaction wrench, and publishes it on the sensor's gz topic, which gz_ros2_control
+         auto-discovers and exposes as the tcp_fts_sensor interfaces. -->
+    <plugin filename="gz-sim-forcetorque-system" name="gz::sim::systems::ForceTorque"/>
+  </gazebo>
+
+  <!-- Wrist force-torque sensor. Attached to wrist_3_joint (a real revolute joint, so
+       bullet-featherstone always models it as a constraint and reports its reaction
+       wrench — a fixed joint at ft_frame would be lumped away). Reported in the child
+       (wrist_3_link) frame; the broadcaster stamps frame_id=wrist_3_link and downstream
+       consumers transform via TF. Name MUST match the <sensor> in the ros2_control block. -->
+  <gazebo reference="$(arg tf_prefix)wrist_3_joint">
+    <sensor name="$(arg tf_prefix)tcp_fts_sensor" type="force_torque">
+      <always_on>true</always_on>
+      <update_rate>500</update_rate>
+      <force_torque>
+        <frame>child</frame>
+        <measure_direction>child_to_parent</measure_direction>
+      </force_torque>
+    </sensor>
+  </gazebo>
+
+</robot>

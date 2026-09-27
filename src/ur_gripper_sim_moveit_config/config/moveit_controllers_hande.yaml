@@ -1,0 +1,36 @@
+# MoveIt controller manager for the UR + Robotiq Hand-E gz bringup.
+# Arm: scaled_joint_trajectory_controller (FollowJointTrajectory).
+# Gripper: gripper_controller is a JointTrajectoryController in this bringup
+# (see ur_gripper_sim/config/ur_gz_controllers.yaml), so MoveIt drives it as
+# FollowJointTrajectory over gripper_controller/follow_joint_trajectory.
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+trajectory_execution:
+  allowed_execution_duration_scaling: 1.2
+  allowed_goal_duration_margin: 0.5
+  allowed_start_tolerance: 0.01
+  execution_duration_monitoring: false  # scaled JTC can stretch time; avoid spurious aborts
+
+moveit_simple_controller_manager:
+  controller_names:
+    - scaled_joint_trajectory_controller
+    - gripper_controller
+
+  scaled_joint_trajectory_controller:
+    action_ns: follow_joint_trajectory
+    type: FollowJointTrajectory
+    default: true
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+
+  gripper_controller:
+    action_ns: follow_joint_trajectory
+    type: FollowJointTrajectory
+    default: true
+    joints:
+      - finger_joint   # hande_right_finger_joint mimics it (URDF <mimic>)

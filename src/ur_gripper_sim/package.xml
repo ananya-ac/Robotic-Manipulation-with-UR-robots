@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ur_gripper_sim</name>
+  <version>0.1.0</version>
+  <description>
+    Gazebo (gz-sim) simulation overlay for UR manipulators with Robotiq Hand-E,
+    extending the upstream ur_simulation_gz vendor package with the legacy
+    ur_gripper_gazebo URDF geometry. For 2F-85 use ros-jazzy-robotiq-description
+    (PickNik ros2_robotiq_gripper) in a follow-up variant.
+  </description>
+
+  <maintainer email="cristian.beltran@sinicx.com">Cristian Beltran</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>cartesian_compliance_controller</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>cubes_sim</exec_depend>
+  <exec_depend>effort_controllers</exec_depend>
+  <exec_depend>force_torque_sensor_broadcaster</exec_depend>
+  <exec_depend>forward_command_controller</exec_depend>
+  <exec_depend>gz_ros2_control</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>position_controllers</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <!-- active_gripper_publisher (bringup) -->
+  <exec_depend>ur_control</exec_depend>
+  <!-- ft_filter node (bringup) -->
+  <exec_depend>ur_control_examples</exec_depend>
+  <!-- PickNik 2F-85 vendor description (geometry + meshes) -->
+  <exec_depend>robotiq_description</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ur_description</exec_depend>
+  <exec_depend>ur_simulation_gz</exec_depend>
+  <exec_depend>worlds</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,17 @@
+# Parameters for ur_control.grippers.GripperController (client node).
+# NOTE: normally you don't need this file — the bringup latches the gripper on
+# /active_gripper and `--gripper auto` resolves it (see ur_control/gripper_configs.py).
+# Kept for manual use:
+#   ros2 run ur_control_examples joint_position_keyboard --gripper generic \
+#     --ros-args --params-file $(ros2 pkg prefix ur_gripper_sim)/share/ur_gripper_sim/config/gripper_hande_client.yaml
+/**:
+  ros__parameters:
+    gripper_type: hand-e
+    # only the actuated finger; hande_right_finger_joint is a mimic of it
+    joint: finger_joint
+    # gz-sim: gripper_controller is a JointTrajectoryController (not GripperAction).
+    gripper_action_interface: trajectory
+    gripper_trajectory_controller: gripper_controller
+    # gz over-close jam workaround: cap per-finger travel (gz_ros2_control ignores
+    # URDF limits). 0.02 m verified safe; raise toward 0.025 if your model allows.
+    gripper_finger_max_position: 0.02

@@ -1,0 +1,42 @@
+# ros_gz_bridge config for the D435 rgbd_camera sensor defined in
+# realsense_d435.gazebo.xacro (topic:=camera).
+#
+# gz side: gz-sensors' RgbdCameraSensor advertises exactly 4 topics off the
+# sensor's <topic> value: <topic>/image, <topic>/depth_image, <topic>/points,
+# <topic>/camera_info (source: RgbdCameraSensor.cc, gz-sensors). There is only
+# ONE camera_info topic shared between color and depth.
+#
+# ros side: topic names deliberately match the real realsense2_camera driver's
+# defaults (/camera/color/image_raw, /camera/depth/image_rect_raw,
+# /camera/depth/color/points, /camera/color/camera_info) so perception code
+# written against sim doesn't change when pointed at real hardware later.
+#
+# CAVEAT: the real driver also publishes a separate /camera/depth/camera_info;
+# gz-sim's rgbd_camera has no depth-specific intrinsics topic to bridge, so
+# that ROS topic simply won't exist in sim. Anything consuming it needs a
+# sim-specific fallback (e.g. reuse color/camera_info, since D435 rgbd_camera
+# in gz uses one shared intrinsics model) until/unless this is revisited.
+
+- ros_topic_name: "camera/color/image_raw"
+  gz_topic_name: "camera/image"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "camera/depth/image_rect_raw"
+  gz_topic_name: "camera/depth_image"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "camera/depth/color/points"
+  gz_topic_name: "camera/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "camera/color/camera_info"
+  gz_topic_name: "camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
