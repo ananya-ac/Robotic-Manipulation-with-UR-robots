@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>stack_bc</name>
+  <version>0.1.0</version>
+  <description>
+    Behavior-cloning data pipeline for cube stacking in the MuJoCo sim: cube randomization,
+    a 10 Hz end-effector executor, a scripted pick-stack oracle, a zarr recorder in
+    diffusion_policy's ReplayBuffer format, and the ROS side of policy evaluation
+    (see diff_pol_bc_plan.md at the workspace root).
+  </description>
+
+  <maintainer email="aa2334@g.rit.edu">Ananya Acharya</maintainer>
+  <license>BSD</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>ur_control</exec_depend>
+  <exec_depend>ur_pykdl</exec_depend>
+  <exec_depend>mujoco_ros2_control_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

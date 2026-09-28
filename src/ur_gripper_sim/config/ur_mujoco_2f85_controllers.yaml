@@ -36,6 +36,13 @@ controller_manager:
     gripper_controller:
       type: position_controllers/GripperActionController
 
+joint_state_broadcaster:
+  ros__parameters:
+    # 100 Hz instead of the controller_manager's 500 Hz: plenty for stack_bc's 10 Hz loop and for
+    # MoveIt, and at 500 Hz the rclpy consumers couldn't keep up (callbacks starved, 0.1-0.8 s
+    # gaps in received state). stack_bc also takes its sim time from these message stamps.
+    update_rate: 100
+
 scaled_joint_trajectory_controller:
   ros__parameters:
     joints:
@@ -50,6 +57,19 @@ scaled_joint_trajectory_controller:
     state_interfaces:
       - position
       - velocity
+    # Explicit goal tolerances: JTC's defaults (all 0 = unchecked) made FollowJointTrajectory
+    # report "Goal successfully reached!" even when shoulder_pan_joint hadn't moved at all (see
+    # the self-collision incident in the migration notes). Only affects action goals (MoveIt);
+    # stack_bc streams 10 Hz setpoints on the ~/joint_trajectory topic, which reports nothing.
+    constraints:
+      stopped_velocity_tolerance: 0.01
+      goal_time: 1.0
+      shoulder_pan_joint: {goal: 0.01}
+      shoulder_lift_joint: {goal: 0.01}
+      elbow_joint: {goal: 0.01}
+      wrist_1_joint: {goal: 0.01}
+      wrist_2_joint: {goal: 0.01}
+      wrist_3_joint: {goal: 0.01}
 
 force_torque_sensor_broadcaster:
   ros__parameters:
