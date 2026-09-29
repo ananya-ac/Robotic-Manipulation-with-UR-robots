@@ -1,5 +1,9 @@
 # Setup
 
+For the MuJoCo simulation, `stack_bc` data collection, and Diffusion Policy training (extra apt
+packages, Python venv, conda env), follow [SETUP.md](SETUP.md). The steps below cover the base
+workspace and the Gazebo bringup.
+
 ## Third-party dependencies
 
 ```bash

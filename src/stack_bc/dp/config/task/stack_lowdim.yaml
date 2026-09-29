@@ -1,0 +1,19 @@
+# UR5e cube stacking (ur_ws_jazzy stack_bc), state-based. See dataset/stack_lowdim_dataset.py.
+name: stack_lowdim
+
+obs_dim: 37     # EE pos3 + rot6d + width + 3 cubes x (pos3 + rot6d)
+action_dim: 10  # desired EE pos3 + rot6d + desired width
+
+# Rollouts run in the ROS/MuJoCo sim outside this repo, not during training.
+env_runner:
+  _target_: stack_dp.null_lowdim_runner.NullLowdimRunner
+
+dataset:
+  _target_: stack_dp.stack_lowdim_dataset.StackLowdimDataset
+  zarr_path: ${oc.env:HOME}/data/stack_bc/overfit.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null

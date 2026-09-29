@@ -104,6 +104,25 @@ class EEExecutor:
         """Single target that the motion stops at (e.g. holding still)."""
         return self.send_plan([T_world], width, stops=True)
 
+    def send_chunk(self, targets):
+        """Execute a policy action chunk: targets[k] (4x4 world EE pose) is reached (k+1)*dt from
+        now. Sent as ONE positions-only trajectory, so JTC interpolates linearly between the 10 Hz
+        setpoints - the paper's execution scheme (App. D.0.1) - and the whole chunk is committed
+        (the next chunk is IK-seeded from its last point). Gripper width is the caller's job, per
+        tick. Returns the (speed-clamped) targets actually commanded."""
+        Ts, q = [], self.q_cmd
+        prev_T = self.ee_cmd
+        points = []
+        for k, T in enumerate(targets):
+            T = self._speed_clamp(T, prev_T)
+            q = self.solve(T, q)
+            points.append(JointTrajectoryPoint(positions=q.tolist(), time_from_start=_duration((k + 1) * self.dt)))
+            Ts.append(T)
+            prev_T = T
+        self._traj_pub.publish(JointTrajectory(joint_names=ARM_JOINTS, points=points))  # zero stamp = now
+        self.q_cmd, self.ee_cmd = q, Ts[-1]
+        return Ts
+
     def move_joints(self, q_target, duration):
         """Plain joint-space move (resets/homing only - not a logged action)."""
         msg = JointTrajectory(joint_names=ARM_JOINTS, points=[JointTrajectoryPoint(

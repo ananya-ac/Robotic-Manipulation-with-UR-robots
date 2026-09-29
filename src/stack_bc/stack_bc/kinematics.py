@@ -7,10 +7,17 @@ queries every EAIK branch itself, because the wrapper (a) returns EAIK's least-s
 seed without accounting for the arm joints' +-2pi range, so an equivalent configuration one turn
 away can lose to a genuinely different branch.
 
+The URDF is sanitized here (sanitize_urdf) before it reaches ur_control: upstream
+EAIKKinematics strips extension blocks with regexes, which break on our xacro output's comments
+that mention "<ros2_control>" (see notes/eaik_urdf_comment_bug.md). Doing it with a real XML
+parser means stack_bc runs against an unmodified upstream ur_control checkout.
+
 Poses are (pos[3], quat_xyzw[4]) in base_link, matching ur_control/PyKDL conventions; the
 *_world variants take/return world-frame poses (the frame cube poses arrive in). base_link is NOT
 aligned with world in this robot description (+90 deg about z), so never mix the two.
 """
+
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import PyKDL
@@ -32,9 +39,22 @@ JOINT_UPPER = -JOINT_LOWER
 FK_POS_TOL = 1e-4   # m - rejects EAIK least-squares approximations of unreachable poses
 FK_ROT_TOL = 1e-3   # rad
 
+NON_URDF_TAGS = ("ros2_control", "mujoco_inputs", "gazebo")
+
+
+def sanitize_urdf(urdf: str) -> str:
+    """Plain URDF: comments dropped (ElementTree's default parser discards them) and top-level
+    ros2_control / mujoco_inputs / gazebo extension blocks removed as elements, not by regex."""
+    root = ET.fromstring(urdf)
+    for child in list(root):
+        if child.tag in NON_URDF_TAGS:
+            root.remove(child)
+    return ET.tostring(root, encoding="unicode")
+
 
 class ArmKinematics:
     def __init__(self, urdf: str, base_link: str = BASE_LINK, tip_link: str = TIP_LINK):
+        urdf = sanitize_urdf(urdf)
         self.kdl = ur_kinematics(base_link=base_link, ee_link=tip_link, robot_description=urdf)
         self._eaik = EAIKKinematics(self.kdl, robot_description=urdf)
         # Fixed world -> base_link transform: a zero-joint KDL chain (ur_kinematics assumes 6 joints).
