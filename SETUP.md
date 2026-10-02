@@ -54,7 +54,7 @@ doesn't have. A plain venv (no system site-packages) is layered on top of a sour
 python3 -m venv ~/venvs/ros-jazzy
 ~/venvs/ros-jazzy/bin/python3 -m pip install \
   mujoco==3.13.0 numpy trimesh pyyaml lxml pycollada obj2mjcf \
-  EAIK==1.2.2 numpy-quaternion "zarr<3" numcodecs pyzmq scipy lark
+  EAIK==1.2.2 numpy-quaternion "zarr<3" numcodecs pyzmq scipy lark imageio imageio-ffmpeg
 # PyKDL is apt-only (the PyPI package doesn't build): copy the apt module into the venv.
 cp /usr/lib/python3/dist-packages/PyKDL.cpython-312-x86_64-linux-gnu.so \
    ~/venvs/ros-jazzy/lib/python3.12/site-packages/
@@ -94,6 +94,10 @@ pip install "numpy==1.26.4" "zarr==2.16.1" "numcodecs==0.12.1" "hydra-core==1.2.
   threadpoolctl termcolor psutil click matplotlib scipy numba "pandas<2.3" pyzmq "setuptools<70"
 ```
 
+- LSTM-GMM baseline (robomimic BC-RNN):
+  `pip install --no-deps robomimic==0.2.0 && pip install h5py tensorboardX imageio`.
+  `--no-deps` skips `egl_probe`, a native build that often fails and is only needed for
+  robomimic's rendering environments, not its policies.
 - `diffusers==0.11.1` is the version the repo's schedulers/UNet code was written against, and it
   needs `huggingface_hub<0.26` (newer hubs removed an API it imports).
 - `pytorch3d` is intentionally not installed: only the repo's `RotationTransformer` imports it, and

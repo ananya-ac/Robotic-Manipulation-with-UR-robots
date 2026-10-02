@@ -78,6 +78,10 @@ class PolicyClient:
     def info(self):
         return self._call({"cmd": "info"})
 
+    def reset(self):
+        """Start-of-episode: clears the policy's recurrent state (LSTM-GMM); no-op for DP."""
+        self._call({"cmd": "reset"})
+
     def act(self, obs):
         rep = self._call({"cmd": "act", "obs": np.asarray(obs, dtype=np.float32)})
         return rep["action"], rep["latency_s"]
@@ -97,6 +101,7 @@ def rollout(sim, env, ex, client, info, xy, yaw, max_time, buf=None, log=print):
     snap = env.snapshot()
     ex.sync(snap.q_arm, snap.ee)
 
+    client.reset()
     history = deque([spaces.state_vector(snap)] * To, maxlen=To)  # pad like training (repeat first)
     chunk, targets, latencies = None, None, []
     hold, reason, success = 0, "timeout", False

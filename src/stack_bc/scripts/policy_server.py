@@ -10,11 +10,14 @@ Runs in the `robodiff` conda env (torch + diffusion_policy), separate from the R
 anywhere: running `python <script>` only adds the SCRIPT's directory to sys.path, not the cwd.
 
 Protocol (ZMQ REQ/REP on localhost, pickled dicts - local and trusted only):
-  {"cmd": "info"}               -> {"n_obs_steps", "n_action_steps", "horizon", "obs_dim", "action_dim", "ckpt"}
+  {"cmd": "info"}               -> {"n_obs_steps", "n_action_steps", "horizon", "obs_dim", "action_dim",
+                                    "inference_steps", "ckpt"}
+  {"cmd": "reset"}              -> {"ok": True}   start of episode: clears recurrent state (LSTM-GMM)
   {"cmd": "act", "obs": (To, obs_dim) float32}
                                 -> {"action": (Ta, action_dim) float32, "latency_s": float}
 "action" is the policy's executable slice (predictions To-1 .. To-1+Ta, un-normalized), i.e.
-exactly what the paper executes before re-planning.
+exactly what the paper executes before re-planning. Works for both the diffusion policy (To=2, Ta=8)
+and the LSTM-GMM baseline (To=1, Ta=1, stateful - hence "reset").
 """
 
 import argparse
@@ -38,8 +41,12 @@ def load_policy(ckpt_path, device, use_ema=True):
     cfg = payload["cfg"]
     workspace = hydra.utils.get_class(cfg._target_)(cfg)
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
-    policy = workspace.ema_model if (use_ema and cfg.training.use_ema) else workspace.model
-    return policy.to(device).eval(), cfg
+    has_ema = getattr(cfg.training, "use_ema", False) and getattr(workspace, "ema_model", None) is not None
+    policy = workspace.ema_model if (use_ema and has_ema) else workspace.model
+    # Not chained: RobomimicLowdimPolicy.to() (LSTM-GMM) returns None instead of self.
+    policy.to(device)
+    policy.eval()
+    return policy, cfg
 
 
 def main():
@@ -58,19 +65,22 @@ def main():
     args.ckpt = os.path.expanduser(args.ckpt)
 
     policy, cfg = load_policy(args.ckpt, args.device, use_ema=not args.no_ema)
-    train_steps = policy.noise_scheduler.config.num_train_timesteps
-    if args.inference_steps < train_steps:
-        from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-        policy.noise_scheduler = DDIMScheduler.from_config(policy.noise_scheduler.config)
-    policy.num_inference_steps = args.inference_steps
+    is_diffusion = hasattr(policy, "noise_scheduler")
+    if is_diffusion:
+        train_steps = policy.noise_scheduler.config.num_train_timesteps
+        if args.inference_steps < train_steps:
+            from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+            policy.noise_scheduler = DDIMScheduler.from_config(policy.noise_scheduler.config)
+        policy.num_inference_steps = args.inference_steps
     info = dict(n_obs_steps=int(cfg.n_obs_steps), n_action_steps=int(cfg.n_action_steps),
                 horizon=int(cfg.horizon), obs_dim=int(cfg.obs_dim), action_dim=int(cfg.action_dim),
-                inference_steps=int(args.inference_steps),
+                inference_steps=int(args.inference_steps) if is_diffusion else None,
                 ckpt=os.path.abspath(args.ckpt))
 
     # Warm-up pass (CUDA init/kernels) so the first real request isn't slow.
     with torch.no_grad():
         policy.predict_action({"obs": torch.zeros(1, info["n_obs_steps"], info["obs_dim"], device=args.device)})
+    policy.reset()  # recurrent policies (LSTM-GMM) must not start episodes with warm-up state
 
     sock = zmq.Context().socket(zmq.REP)
     sock.bind(f"tcp://127.0.0.1:{args.port}")
@@ -79,6 +89,10 @@ def main():
         req = sock.recv_pyobj()
         if req.get("cmd") == "info":
             sock.send_pyobj(info)
+            continue
+        if req.get("cmd") == "reset":
+            policy.reset()  # start-of-episode: clears recurrent state (no-op for diffusion policies)
+            sock.send_pyobj({"ok": True})
             continue
         if req.get("cmd") != "act":
             sock.send_pyobj({"error": f"unknown cmd {req.get('cmd')!r}"})

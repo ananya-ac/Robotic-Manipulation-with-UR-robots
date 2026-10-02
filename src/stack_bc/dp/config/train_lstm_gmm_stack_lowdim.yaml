@@ -1,0 +1,99 @@
+# LSTM-GMM baseline (robomimic BC-RNN, the Diffusion Policy paper's main baseline) on the
+# state-based stacking task. Copied from diffusion_policy's train_robomimic_lowdim_workspace.yaml
+# with these changes:
+#   - task: stack_lowdim (same dataset/normalizer as the diffusion policy; NullLowdimRunner)
+#   - robomimic hyperparameters from its published "square / ph / low_dim" config (the DP paper's
+#     robomimic setting): 2-layer LSTM, 400 hidden, 5-mode GMM, 10-step training sequences, lr 1e-4
+#   - checkpoints ranked by train_loss (GMM negative log-likelihood; no rollout score in training)
+#   - wandb offline by default
+#
+# Recurrent, one-step policy: it sees ONE observation per call, outputs ONE action, and carries
+# its LSTM state between calls (reset at episode start) - so evaluation queries it every tick
+# (n_action_steps: 1). Actions are the same absolute EE-pose setpoints the diffusion policy uses;
+# the paper evaluated baselines with velocity actions instead (their best case, Fig. 4), so this
+# comparison isolates the policy class rather than reproducing the paper's baseline numbers.
+defaults:
+  - _self_
+  - task: stack_lowdim
+
+name: train_robomimic_lowdim
+_target_: diffusion_policy.workspace.train_robomimic_lowdim_workspace.TrainRobomimicLowdimWorkspace
+
+obs_dim: ${task.obs_dim}
+action_dim: ${task.action_dim}
+transition_dim: "${eval: ${task.obs_dim} + ${task.action_dim}}"
+task_name: ${task.name}
+exp_name: "default"
+
+horizon: 10          # BC-RNN training sequence length (robomimic rnn.horizon)
+n_obs_steps: 1
+n_action_steps: 1
+n_latency_steps: 0
+past_action_visible: False
+
+policy:
+  _target_: diffusion_policy.policy.robomimic_lowdim_policy.RobomimicLowdimPolicy
+  action_dim: ${action_dim}
+  obs_dim: ${obs_dim}
+  algo_name: bc_rnn
+  obs_type: low_dim
+  task_name: square      # which robomimic paper config to take hyperparameters from
+  dataset_type: ph
+
+dataloader:
+  batch_size: 256
+  num_workers: 4
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 256
+  num_workers: 4
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: True
+  num_epochs: 3000
+  rollout_every: 50
+  checkpoint_every: 50
+  val_every: 1
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: stack_bc_diffusion_policy
+  resume: True
+  mode: offline
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.4f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}

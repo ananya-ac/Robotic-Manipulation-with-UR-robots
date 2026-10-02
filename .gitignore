@@ -14,3 +14,12 @@ src/ur_camera_gz/meshes/d435i/part_*/
 # python
 __pycache__/
 *.pyc
+
+# rendered episode/rollout videos (stack_bc.replay) - local only
+videos/
+
+# trained checkpoints + datasets (~1 GB) - local only
+checkpoint_and_data_diffusion_policy/
+
+# personal working notes - local only
+notes/
