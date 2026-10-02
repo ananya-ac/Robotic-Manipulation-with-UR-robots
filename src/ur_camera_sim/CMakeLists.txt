@@ -6,5 +6,8 @@ find_package(ament_cmake REQUIRED)
 install(DIRECTORY config launch urdf meshes
   DESTINATION share/${PROJECT_NAME}
 )
+install(PROGRAMS scripts/depth_to_cloud.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()

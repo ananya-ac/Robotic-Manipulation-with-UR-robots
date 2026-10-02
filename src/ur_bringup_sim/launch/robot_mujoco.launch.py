@@ -192,6 +192,14 @@ def launch_setup(context, *args, **kwargs):
         arguments=["-t", "wrench"],
         parameters=[{"use_sim_time": True}], output="screen")
 
+    # MuJoCo's CameraPlugin publishes color + depth but no point cloud (see the camera xacro's
+    # KNOWN GAP note); this back-projects depth to /camera/depth/color/points, the same topic the
+    # Gazebo bridge publishes, so cloud consumers (e.g. MoveIt's octomap) work on both backends.
+    depth_to_cloud = Node(
+        package="ur_camera_sim", executable="depth_to_cloud.py", output="screen",
+        parameters=[{"use_sim_time": True}],
+        condition=IfCondition(LaunchConfiguration("pointcloud")))
+
     rviz_config = PathJoinSubstitution([FindPackageShare("ur_bringup_sim"), "config", "camera_view.rviz"])
     rviz_node = Node(
         package="rviz2", executable="rviz2", name="rviz2", output="screen",
@@ -218,7 +226,7 @@ def launch_setup(context, *args, **kwargs):
 
     return [
         robot_state_publisher, ros2_control_node,
-        active_gripper_pub, ft_filter, rviz_node,
+        active_gripper_pub, ft_filter, depth_to_cloud, rviz_node,
         jsb, jtc, fvc, compliance, gc, fts,
     ]
 
@@ -235,6 +243,8 @@ def generate_launch_description():
                               description="Spawn gripper_controller"),
         DeclareLaunchArgument("rviz", default_value="true",
                               description="Launch rviz2 with the camera view config"),
+        DeclareLaunchArgument("pointcloud", default_value="true",
+                              description="Publish /camera/depth/color/points from the depth image"),
         DeclareLaunchArgument("camera_offset", default_value="0",
                               description="Wrist camera Z offset from tool0 (see the xacro's own comment)"),
         DeclareLaunchArgument("camera_offset_x", default_value="0",

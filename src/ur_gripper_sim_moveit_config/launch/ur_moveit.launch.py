@@ -9,7 +9,17 @@
 #   ros2 launch ur_gripper_sim ur_2f85_gz_control.launch.py gui:=false     # 2F-85 (ur5e)
 #   ros2 launch ur_gripper_sim_moveit_config ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85
 #
+#   ros2 launch ur_bringup_sim robot_mujoco.launch.py rviz:=false               # 2F-85 (ur5e), MuJoCo
+#   ros2 launch ur_gripper_sim_moveit_config ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85 sensors:=true
+#
 # load_gripper:=false  -> arm-only planning (gripper still collision-exempt, but not a group).
+# sensors:=true        -> octomap from the wrist camera's /camera/depth/color/points
+#                         (config/wrist_depth_sensors_3d.yaml), shown by RViz's MotionPlanning
+#                         display and published on /monitored_planning_scene. stack_bc's
+#                         `collect --scene sensors` plans against this scene (its moveit_py
+#                         mirrors /monitored_planning_scene), so run this alongside collection.
+#
+# Pipelines: OMPL (default) + Pilz (LIN/PTP/CIRC) - Pilz is what stack_bc's oracle plans with.
 #
 # Self-contained: planning pipelines / kinematics / joint_limits are vendored under config/ so
 # they can be customized. The gripper is a MoveIt planning group + end_effector; per-gripper
@@ -35,24 +45,29 @@ def launch_setup(context, *args, **kwargs):
     gripper = LaunchConfiguration("gripper").perform(context)
     load_gripper = LaunchConfiguration("load_gripper").perform(context)
     launch_rviz = LaunchConfiguration("launch_rviz")
+    sensors = LaunchConfiguration("sensors").perform(context).lower() == "true"
 
     share = get_package_share_directory(PKG)
+    cfg = os.path.join(share, "config")
     srdf_path = os.path.join(share, "srdf", "ur_gripper_sim.srdf.xacro")
-    controllers = os.path.join(share, "config", "moveit_controllers_%s.yaml" % gripper)
+    controllers = os.path.join(cfg, "moveit_controllers_%s.yaml" % gripper)
 
-    # robot_description is NOT set here — move_group reads it from the running gz bringup's
+    # robot_description is NOT set here — move_group reads it from the running bringup's
     # /robot_description topic (arm + gripper). We only supply the semantic + planning config.
-    moveit_config = (
+    builder = (
         MoveItConfigsBuilder(robot_name="ur", package_name=PKG)
         .robot_description_semantic(
             file_path=srdf_path,
             mappings={"name": ur_type, "gripper": gripper, "load_gripper": load_gripper})
-        .robot_description_kinematics(file_path=os.path.join(share, "config", "kinematics.yaml"))
-        .joint_limits(file_path=os.path.join(share, "config", "joint_limits.yaml"))
+        .robot_description_kinematics(file_path=os.path.join(cfg, "kinematics.yaml"))
+        .joint_limits(file_path=os.path.join(cfg, "joint_limits.yaml"))
         .trajectory_execution(file_path=controllers)
-        .planning_pipelines(pipelines=["ompl"], default_planning_pipeline="ompl")
-        .to_moveit_configs()
+        .planning_pipelines(pipelines=["ompl", "pilz_industrial_motion_planner"], default_planning_pipeline="ompl")
+        .pilz_cartesian_limits(file_path=os.path.join(cfg, "pilz_cartesian_limits.yaml"))
     )
+    if sensors:
+        builder = builder.sensors_3d(file_path=os.path.join(cfg, "wrist_depth_sensors_3d.yaml"))
+    moveit_config = builder.to_moveit_configs()
 
     move_group = Node(
         package="moveit_ros_move_group",
@@ -91,5 +106,8 @@ def generate_launch_description():
                               description="true: gripper is a MoveIt group/end-effector; false: arm-only"),
         DeclareLaunchArgument("launch_rviz", default_value="true",
                               description="Launch RViz MotionPlanning"),
+        DeclareLaunchArgument("sensors", default_value="false",
+                              description="Build an octomap from /camera/depth/color/points "
+                                          "(config/wrist_depth_sensors_3d.yaml)"),
         OpaqueFunction(function=launch_setup),
     ])

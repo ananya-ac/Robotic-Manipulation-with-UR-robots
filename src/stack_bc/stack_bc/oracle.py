@@ -16,6 +16,8 @@ the cube up with the tip. On failure: open, back off, retry once from the cube's
 a second failure ends the episode as failed.
 """
 
+from contextlib import nullcontext
+
 import numpy as np
 
 from stack_bc import rotations as rot
@@ -43,9 +45,11 @@ def canonical_grasp_yaw(cube_R, reference_yaw):
 
 
 class ScriptedStackOracle:
-    def __init__(self, sim, env, motion, gripper):
-        """gripper: an EEExecutor (only its set_width is used - force-limited GripperCommand)."""
+    def __init__(self, sim, env, motion, gripper, scene=None):
+        """gripper: an EEExecutor (only its set_width is used - force-limited GripperCommand).
+        scene: a scene_sensing.SceneManager when planning against the sensor-built octomap."""
         self.sim, self.env, self.motion, self.gripper = sim, env, motion, gripper
+        self.scene = scene
         self.phase = "start"
         self.cmd = None       # last commanded tip pose (4x4 world)
         self.grasps = []
@@ -72,15 +76,23 @@ class ScriptedStackOracle:
         self.motion.lin(T_goal, speed, label=f"{self.phase}/{label}")
         self.cmd = T_goal.copy()
 
-    def _transit(self, T_goal, via_z):
-        """Rise to via_z, move horizontally (rotating) to above the goal, descend to the goal."""
+    def _transit(self, T_goal, via_z, contact_rise=False):
+        """Rise to via_z, move horizontally (rotating) to above the goal, descend to the goal.
+        contact_rise: the vertical rise starts in contact (carried cube still overlapping the
+        voxels of the spot it was lifted from), so plan it with octomap contact allowed."""
         up = self.cmd.copy()
         up[2, 3] = max(via_z, self.cmd[2, 3])
-        self._move(up, V_LIFT, "rise")
+        with self._contact() if contact_rise else nullcontext():
+            self._move(up, V_LIFT, "rise")
         over = T_goal.copy()
         over[2, 3] = up[2, 3]
         self._move(over, V_FREE, "over")
         self._move(T_goal, V_FREE, "down")
+
+    def _contact(self):
+        """Grasp/place segments: the octomap holds the target cube / stack itself, so these short
+        vertical moves may touch it. Transits outside this block stay fully collision-checked."""
+        return self.scene.contact() if self.scene is not None else nullcontext()
 
     def _set_gripper(self, width):
         """Command a width and wait (sim time) until the measured gap stops moving."""
@@ -104,29 +116,34 @@ class ScriptedStackOracle:
         hover = rot.pose_matrix(snap.cube_pos[src] + [0, 0, task.HOVER_HEIGHT], R_grasp)
         self._transit(hover, hover[2, 3])
 
-        cube_p = self.env.snapshot().cube_pos[src]  # re-read: anything nudged during the approach
-        self._move(rot.pose_matrix(cube_p, R_grasp), V_APPROACH, "descend")
-        held_width = self._set_gripper(WIDTH_CLOSED).width
+        with self._contact():
+            cube_p = self.env.snapshot().cube_pos[src]  # re-read: anything nudged during the approach
+            self._move(rot.pose_matrix(cube_p, R_grasp), V_APPROACH, "descend")
+            held_width = self._set_gripper(WIDTH_CLOSED).width
 
-        before = self.env.snapshot()
-        test = self.cmd.copy()
-        test[2, 3] += TEST_LIFT
-        self._move(test, V_LIFT, "test_lift")
-        self.sim.sleep(0.3)
-        after = self.env.snapshot()
-        # Compare the cube's rise to the TIP's actual rise, not the commanded TEST_LIFT: closing
-        # the fingers pushes the tip up a few mm (seen: 4 mm), so the tip itself only rises ~12 mm
-        # of the commanded 15 and a held cube follows it almost exactly.
-        tip_rise = after.ee[2, 3] - before.ee[2, 3]
-        lifted = after.cube_pos[src][2] - before.cube_pos[src][2]
-        ok = (GRASP_WIDTH_RANGE[0] <= held_width <= GRASP_WIDTH_RANGE[1]) and \
-            lifted > max(0.005, 0.7 * tip_rise)
-        self.grasps.append(dict(cube=src, width=held_width, lifted=lifted, tip_rise=tip_rise, ok=ok))
-        if not ok:
-            self._set_gripper(WIDTH_OPEN)
-            back = self.cmd.copy()
-            back[2, 3] = self.env.snapshot().cube_pos[src][2] + task.HOVER_HEIGHT
-            self._move(back, V_LIFT, "back_off")
+            before = self.env.snapshot()
+            test = self.cmd.copy()
+            test[2, 3] += TEST_LIFT
+            self._move(test, V_LIFT, "test_lift")
+            self.sim.sleep(0.3)
+            after = self.env.snapshot()
+            # Compare the cube's rise to the TIP's actual rise, not the commanded TEST_LIFT: closing
+            # the fingers pushes the tip up a few mm (seen: 4 mm), so the tip itself only rises ~12 mm
+            # of the commanded 15 and a held cube follows it almost exactly.
+            tip_rise = after.ee[2, 3] - before.ee[2, 3]
+            lifted = after.cube_pos[src][2] - before.cube_pos[src][2]
+            ok = (GRASP_WIDTH_RANGE[0] <= held_width <= GRASP_WIDTH_RANGE[1]) and \
+                lifted > max(0.005, 0.7 * tip_rise)
+            self.grasps.append(dict(cube=src, width=held_width, lifted=lifted, tip_rise=tip_rise, ok=ok))
+            if not ok:
+                self._set_gripper(WIDTH_OPEN)
+                back = self.cmd.copy()
+                back[2, 3] = self.env.snapshot().cube_pos[src][2] + task.HOVER_HEIGHT
+                self._move(back, V_LIFT, "back_off")
+        if ok and self.scene is not None:
+            # Nominal grasp (tip at the cube center, faces aligned with the grasp yaw), not the
+            # simulator's cube pose: this is what the robot itself knows about what it holds.
+            self.scene.attach_cube(np.eye(4))
         return ok
 
     def _place(self, src, dst, level):
@@ -148,10 +165,13 @@ class ScriptedStackOracle:
         hover[2, 3] += task.HOVER_HEIGHT
         # Carry at max(pick hover, place hover): cmd is at the test-lift height (grasp + TEST_LIFT).
         via_z = max(hover[2, 3], self.cmd[2, 3] + (task.HOVER_HEIGHT - TEST_LIFT))
-        self._transit(hover, via_z)
+        self._transit(hover, via_z, contact_rise=True)
 
-        self._move(T_place, V_APPROACH, "descend")
-        self._set_gripper(WIDTH_OPEN)
-        up = self.cmd.copy()
-        up[2, 3] += task.HOVER_HEIGHT
-        self._move(up, V_LIFT, "retreat")
+        with self._contact():
+            self._move(T_place, V_APPROACH, "descend")
+            self._set_gripper(WIDTH_OPEN)
+            if self.scene is not None:
+                self.scene.detach_cube()
+            up = self.cmd.copy()
+            up[2, 3] += task.HOVER_HEIGHT
+            self._move(up, V_LIFT, "retreat")

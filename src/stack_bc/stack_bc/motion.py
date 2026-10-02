@@ -16,18 +16,15 @@ plain joint trajectory. A Pilz PTP to a RobotState goal segfaulted inside moveit
 RobotState.set_joint_group_positions binding, even with the robot model kept alive.
 """
 
-import os
-import tempfile
 import threading
 
 import numpy as np
-from ament_index_python.packages import get_package_share_directory
 from moveit.core.kinematic_constraints import construct_link_constraint
 from moveit.planning import MoveItPy, PlanRequestParameters
-from moveit_configs_utils import MoveItConfigsBuilder
 
 from stack_bc import rotations as rot
 from stack_bc.kinematics import ARM_JOINTS
+from stack_bc.moveit_config import moveit_py_params
 
 ARM_GROUP = "ur_manipulator"
 TIP_LINK = "gripper_tip_link"
@@ -39,34 +36,14 @@ class PlanningFailure(RuntimeError):
 
 
 class MoveItMotion:
-    def __init__(self, robot_description: str, sim_now):
-        """robot_description: the live URDF string. sim_now: callable -> current sim time (s)."""
+    def __init__(self, robot_description: str, sim_now, mirror_scene: bool = False):
+        """robot_description: the live URDF string. sim_now: callable -> current sim time (s).
+        mirror_scene: plan against move_group's sensor-built scene (see moveit_config.py)."""
         self._sim_now = sim_now
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".urdf", delete=False)
-        tmp.write(robot_description)
-        tmp.close()
-        share = get_package_share_directory("ur_gripper_sim_moveit_config")
-        cfg = os.path.join(share, "config")
-        moveit_config = (
-            MoveItConfigsBuilder(robot_name="ur", package_name="ur_gripper_sim_moveit_config")
-            .robot_description(file_path=tmp.name)
-            .robot_description_semantic(file_path=os.path.join(share, "srdf", "ur_gripper_sim.srdf.xacro"),
-                                        mappings={"name": "ur5e", "gripper": "robotiq_2f85", "load_gripper": "true"})
-            .robot_description_kinematics(file_path=os.path.join(cfg, "kinematics.yaml"))
-            .joint_limits(file_path=os.path.join(cfg, "joint_limits.yaml"))
-            .trajectory_execution(file_path=os.path.join(cfg, "moveit_controllers_robotiq_2f85.yaml"))
-            .planning_pipelines(pipelines=["ompl", "pilz_industrial_motion_planner"], default_planning_pipeline="ompl")
-            .pilz_cartesian_limits(file_path=os.path.join(cfg, "pilz_cartesian_limits.yaml"))
-            .moveit_cpp(file_path=os.path.join(cfg, "moveit_cpp.yaml"))
-            .to_moveit_configs()
-        )
-        config = moveit_config.to_dict()
-        config["use_sim_time"] = True
-        config["qos_overrides"] = {"/clock": {"subscription": {
-            "reliability": "best_effort", "durability": "volatile", "history": "keep_last", "depth": 1}}}
+        config = moveit_py_params(robot_description, mirror_scene=mirror_scene)
         self.robot = MoveItPy(node_name="stack_bc_moveit", config_dict=config)
-        os.unlink(tmp.name)
         self.arm = self.robot.get_planning_component(ARM_GROUP)
+        self.scene_monitor = self.robot.get_planning_scene_monitor()
 
         self._lock = threading.Lock()
         self._active = None   # (t0_sim, times (N,), positions (N, 6)) of the executing/last move

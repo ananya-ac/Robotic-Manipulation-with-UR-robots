@@ -1,6 +1,8 @@
 """Collect scripted stacking demonstrations into a zarr ReplayBuffer (sim must be running).
 
   python3 -m stack_bc.collect --out ~/data/stack_bc/debug.zarr --episodes 200 [--seed 0] [--max-attempts N]
+      [--scene sensors]   # plan against a wrist-depth octomap; needs
+                          # ros2 launch ur_gripper_sim_moveit_config ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85 sensors:=true
 
 The oracle moves the robot through MoveIt (Pilz LIN trajectories, see motion.py) in the main
 thread; a recorder thread samples a fixed 10 Hz sim-time grid meanwhile, logging the observation
@@ -31,6 +33,7 @@ from stack_bc.motion import MoveItMotion, PlanningFailure
 from stack_bc.oracle import OracleFailure, ScriptedStackOracle
 from stack_bc.recorder import EpisodeBuffer, ReplayWriter
 from stack_bc.runtime import SimNode
+from stack_bc.scene_sensing import SceneManager
 
 DT = 0.1
 SUCCESS_HOLD_TICKS = 10
@@ -41,6 +44,7 @@ MAX_EPISODE_TIME = 120.0      # s sim time
 # with more than MAX_IRREGULAR_TICKS are marked failed ("timing") and filtered out of training.
 TICK_TOLERANCE = 0.02
 MAX_IRREGULAR_TICKS = 3
+SCAN_MOVE_TIME = 2.0          # s per unrecorded joint move to / from task.SCAN_Q (--scene sensors)
 
 
 class TickRecorder(threading.Thread):
@@ -77,7 +81,18 @@ class TickRecorder(threading.Thread):
         self.join(timeout=2.0)
 
 
-def home_and_reset(sim, env, motion, ex, rng):
+def scan_scene(sim, ex, scene):
+    """Rebuild the octomap for the freshly reset world from the wrist camera (unrecorded)."""
+    scene.detach_cube()   # an episode that failed mid-carry leaves the cube attached
+    scene.clear()
+    ex.move_joints(task.SCAN_Q, SCAN_MOVE_TIME)
+    sim.sleep(SCAN_MOVE_TIME + 0.3)
+    scene.wait_for_map()
+    ex.move_joints(task.HOME_Q, SCAN_MOVE_TIME)
+    sim.sleep(SCAN_MOVE_TIME + 0.3)
+
+
+def home_and_reset(sim, env, motion, ex, rng, scene=None):
     snap = env.snapshot()
     if np.max(np.abs(snap.q_arm - task.HOME_Q)) > 1e-3:
         ex.move_joints(task.HOME_Q, 2.5)  # unrecorded; see motion.py on why not MoveIt PTP
@@ -90,14 +105,16 @@ def home_and_reset(sim, env, motion, ex, rng):
     env.reset_world(xy, yaw)
     motion.forget()
     sim.sleep(0.5)  # contacts settle
+    if scene is not None:
+        scan_scene(sim, ex, scene)
 
 
-def run_episode(sim, env, motion, ex, seed):
+def run_episode(sim, env, motion, ex, seed, scene=None):
     rng = np.random.default_rng(seed)
-    home_and_reset(sim, env, motion, ex, rng)
+    home_and_reset(sim, env, motion, ex, rng, scene)
     order = [int(i) for i in rng.permutation(task.N_CUBES)]
     buf = EpisodeBuffer(env.model)
-    oracle = ScriptedStackOracle(sim, env, motion, ex)
+    oracle = ScriptedStackOracle(sim, env, motion, ex, scene)
     rec = TickRecorder(sim, env, motion, ex, buf)
     rec.start()
     t_start = sim.now()
@@ -135,6 +152,9 @@ def main():
     parser.add_argument("--max-attempts", type=int, default=None, help="give up after this many attempts "
                         "(default: 2x --episodes)")
     parser.add_argument("--seed", type=int, default=0, help="first seed for a NEW dataset (ignored on resume)")
+    parser.add_argument("--scene", choices=("none", "sensors"), default="none",
+                        help="MoveIt collision world: none (self-collision only) or sensors (wrist-depth "
+                        "octomap; needs `ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85 sensors:=true`)")
     args = parser.parse_args()
     max_attempts = args.max_attempts or 2 * args.episodes
 
@@ -150,12 +170,13 @@ def main():
     ex.wait_for_servers()
     if not sim.wait_for(env.ready, 10.0):
         raise RuntimeError("no /joint_states or cube poses")
-    motion = MoveItMotion(env.urdf, sim.now)
+    motion = MoveItMotion(env.urdf, sim.now, mirror_scene=args.scene == "sensors")
+    scene = SceneManager(sim.node, env.urdf, motion.scene_monitor) if args.scene == "sensors" else None
 
     added, attempts = 0, 0
     while added < args.episodes and attempts < max_attempts:
         t0 = time.time()
-        buf, success, reason, order, rec = run_episode(sim, env, motion, ex, seed)
+        buf, success, reason, order, rec = run_episode(sim, env, motion, ex, seed, scene)
         attempts += 1
         timing = f" [{rec.irregular} off-slot ticks, worst {rec.worst * 1000:.0f} ms]" if rec.irregular else ""
         if success:

@@ -17,6 +17,9 @@
   <exec_depend>moveit_ros_move_group</exec_depend>
   <exec_depend>moveit_kinematics</exec_depend>
   <exec_depend>moveit_planners_ompl</exec_depend>
+  <exec_depend>pilz_industrial_motion_planner</exec_depend>
+  <!-- PointCloudOctomapUpdater for sensors:=true (config/wrist_depth_sensors_3d.yaml) -->
+  <exec_depend>moveit_ros_perception</exec_depend>
   <exec_depend>moveit_simple_controller_manager</exec_depend>
   <!-- arm SRDF macro (ur_srdf) is reused from the apt UR MoveIt config -->
   <exec_depend>ur_moveit_config</exec_depend>

@@ -1,0 +1,27 @@
+# Occupancy map (octomap) from the wrist D435 depth camera, loaded by
+#   ros2 launch ur_gripper_sim_moveit_config ur_moveit.launch.py ... sensors:=true
+# Deliberately NOT named sensors_3d.yaml: MoveItConfigsBuilder auto-loads that name into every
+# config built from this package (moveit_py scripts, sensorless move_group) whether asked or not.
+#
+# Cloud source: /camera/depth/color/points - bridged from the Gazebo rgbd sensor, or on MuJoCo
+# back-projected from the depth image by ur_camera_sim's depth_to_cloud.py (started by
+# robot_mujoco.launch.py; frame camera_color_toein_frame, the optical site the camera renders
+# from). Needs ros-jazzy-moveit-ros-perception (provides PointCloudOctomapUpdater).
+octomap_frame: world
+octomap_resolution: 0.01        # m; cubes are 4.5 cm
+max_range: 1.2
+
+sensors: ["wrist_depth"]
+wrist_depth:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /camera/depth/color/points
+  max_range: 1.2
+  point_subsample: 1            # depth_to_cloud already strides the image
+  padding_offset: 0.03          # m; self-filter margin around robot links + attached cube
+  padding_scale: 1.0
+  max_update_rate: 5.0
+  # Debug: cloud after self-filtering. Must be RELATIVE - the updater publishes on
+  # ns + "/" + this, so a leading "/" makes an invalid name and kills move_group.
+  # Resulting topic: /wrist_depth/filtered_points
+  filtered_cloud_topic: filtered_points
+  ns: wrist_depth

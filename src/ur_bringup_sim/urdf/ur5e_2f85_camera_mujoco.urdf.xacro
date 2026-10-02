@@ -153,8 +153,8 @@
        downstream perception consumers need no changes vs. the Gazebo setup.
        KNOWN GAP vs. Gazebo: no point-cloud output here (camera_bridge.yaml also bridges
        camera/depth/color/points; mujoco_ros2_control_plugins' CameraPlugin doesn't publish
-       one) - downstream code relying on the point cloud topic will need a depth-to-cloud
-       node, or this can be revisited if MuJoCo point-cloud output becomes available. -->
+       one) - filled by ur_camera_sim's depth_to_cloud.py, which robot_mujoco.launch.py starts
+       (pointcloud:=true) and which publishes the same camera/depth/color/points topic. -->
   <xacro:property name="extra_ros2_control_sensors">
     <sensor name="$(arg tf_prefix)camera">
       <param name="frame_name">$(arg tf_prefix)camera_color_toein_frame</param>
