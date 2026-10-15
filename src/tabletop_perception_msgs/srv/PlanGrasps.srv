@@ -1,0 +1,7 @@
+# Antipodal grasp candidates for one object from the latest detection.
+string name           # class name from DetectObjects
+int32 max_candidates  # <= 0: node default
+---
+tabletop_perception_msgs/GraspCandidate[] grasps   # best first
+bool success
+string message

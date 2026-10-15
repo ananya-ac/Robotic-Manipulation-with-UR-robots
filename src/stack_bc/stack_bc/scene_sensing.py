@@ -38,9 +38,9 @@ GRIPPER_LINK_PATTERN = r"^(robotiq_85_\w+|ur_to_robotiq_link|gripper_mount_link|
 MIN_OCTOMAP_BYTES = 1000            # a scan of the table is far larger; an empty tree is ~0
 
 
-def _call(client, req, name, timeout=5.0):
+def _call(client, req, name, timeout=5.0, hint="is ur_moveit.launch.py ... sensors:=true running?"):
     if not client.wait_for_service(timeout_sec=timeout):
-        raise RuntimeError(f"{name} unavailable - is ur_moveit.launch.py ... sensors:=true running?")
+        raise RuntimeError(f"{name} unavailable - {hint}")
     done = threading.Event()
     future = client.call_async(req)
     future.add_done_callback(lambda _: done.set())
@@ -107,12 +107,18 @@ class SceneManager:
     # ---- held cube ---------------------------------------------------------------------------
 
     def attach_cube(self, T_tip_cube):
-        box = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[task.CUBE_SIZE] * 3)
+        self.attach_object((task.CUBE_SIZE,) * 3, T_tip_cube)
+
+    def attach_object(self, extent, T_tip_obj):
+        """Planning-scene only (no physics): a box of `extent` (x, y, z in its own frame) rides on
+        gripper_tip_link at T_tip_obj, so carry moves are collision-checked with it and the octomap
+        self-filter drops its points. The sim holds the object by contact/friction alone."""
+        box = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[float(e) for e in extent])
         pose = Pose()
         p = pose.position
-        p.x, p.y, p.z = map(float, T_tip_cube[:3, 3])
+        p.x, p.y, p.z = map(float, T_tip_obj[:3, 3])
         o = pose.orientation
-        o.x, o.y, o.z, o.w = map(float, rot.matrix_to_quat(T_tip_cube[:3, :3]))
+        o.x, o.y, o.z, o.w = map(float, rot.matrix_to_quat(T_tip_obj[:3, :3]))
         aco = AttachedCollisionObject(link_name=TIP_LINK, touch_links=self.gripper_links)
         aco.object.id = HELD_ID
         aco.object.header.frame_id = TIP_LINK
@@ -121,6 +127,9 @@ class SceneManager:
         aco.object.operation = CollisionObject.ADD
         self._apply_attached(aco, remove_world=False)
         self.holding = True
+
+    def detach_object(self):
+        self.detach_cube()
 
     def detach_cube(self):
         if not self.holding:

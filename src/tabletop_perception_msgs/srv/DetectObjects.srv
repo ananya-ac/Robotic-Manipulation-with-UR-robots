@@ -1,0 +1,10 @@
+# Segment objects on the support surface.
+string[] names    # classes to return (empty = all detected)
+bool use_map      # true: the fused multi-view map (reset_map / add_view); false: a single frame
+bool fresh        # single frame only: wait for a frame newer than the request (camera's current view)
+---
+vision_msgs/Detection3DArray detections   # bbox.center = object center (yaw-only rotation), bbox.size = extent;
+                                          # results[0].hypothesis.class_id = class name ("unknown_<i>" if no palette match),
+                                          # results[0].hypothesis.score = 1.0 if the top face was seen, else 0.5
+bool success
+string message

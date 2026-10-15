@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>tabletop_perception</name>
+  <version>0.1.0</version>
+  <description>
+    Tabletop object perception and antipodal grasp detection from an RGB-D camera: support-plane
+    segmentation, color-classified objects with poses and extents, multi-view fusion, and
+    parallel-jaw antipodal grasps. A ROS-free core (tabletop_perception.core) plus a node serving
+    it. Robot- and task-agnostic: robots, cameras, palettes and grippers come from YAML.
+    Needs Open3D (pip, see SETUP.md) - run the node from the environment that has it.
+  </description>
+
+  <maintainer email="aa2334@g.rit.edu">Ananya Acharya</maintainer>
+  <license>BSD</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>message_filters</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>tabletop_perception_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

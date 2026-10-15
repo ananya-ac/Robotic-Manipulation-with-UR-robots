@@ -14,6 +14,9 @@
   meta/episode_success (E,)    bool      label for filtering/eval, NOT a reward
   meta/episode_seed   (E,)     int64
   meta/episode_order  (E, 3)   int64     stack order (base first)
+  data/obj_pose_perceived (T, 27) float32 oracle_obj_unknown only: the oracle's perceived object
+                                          poses (pos + rot6d per cube, NaN until seen), for analysis
+  attrs["oracle"]                         "obj_known" | "obj_unknown" (untagged = obj_known)
 
 Dense per-tick (obs_t, action_t) - no pre-chunking; horizons are training-time choices. There is
 deliberately no reward array: offline RL later only needs one added alongside these.
@@ -44,7 +47,9 @@ class EpisodeBuffer:
     def __len__(self):
         return len(self.rows["state"])
 
-    def record(self, snap, T_cmd, width_cmd):
+    def record(self, snap, T_cmd, width_cmd, perceived=None):
+        """perceived: optional (N_CUBES * 9,) the oracle's perceived object poses (oracle_obj_unknown)
+        -> data/obj_pose_perceived. Absent for oracle_obj_known, whose schema is unchanged."""
         qpos = np.zeros(self.nq)
         qpos[self.arm_adr] = snap.q_arm
         qpos[self.grip_adr] = snap.q_gripper
@@ -59,6 +64,8 @@ class EpisodeBuffer:
         r["width"].append(np.float32(snap.width))
         r["desired_width"].append(np.float32(width_cmd))
         r["timestamp"].append(snap.stamp)
+        if perceived is not None:
+            r.setdefault("obj_pose_perceived", []).append(np.asarray(perceived, np.float32))
 
     def arrays(self):
         dtypes = {"qpos": np.float64, "timestamp": np.float64}
@@ -66,8 +73,15 @@ class EpisodeBuffer:
 
 
 class ReplayWriter:
-    def __init__(self, path):
+    def __init__(self, path, oracle=None):
+        """oracle: 'obj_known' | 'obj_unknown' - stored in root.attrs['oracle']; appending to a
+        dataset written by the other oracle is refused (untagged datasets are obj_known)."""
         self.root = zarr.open_group(path, mode="a")
+        if oracle is not None:
+            existing = self.root.attrs.get("oracle", "obj_known" if "data" in self.root else None)
+            if existing is not None and existing != oracle:
+                raise ValueError(f"{path} holds oracle_{existing} episodes; refusing to add oracle_{oracle} ones")
+            self.root.attrs["oracle"] = oracle
         self.data = self.root.require_group("data")
         self.meta = self.root.require_group("meta")
 

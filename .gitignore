@@ -23,3 +23,9 @@ checkpoint_and_data_diffusion_policy/
 
 # personal working notes - local only
 notes/
+
+# perception stack state report - local only (also covered by notes/)
+notes/perception_stack_report.md
+
+# figures saved at the workspace root (e.g. perception renders) - local only
+/*.png

@@ -1,4 +1,5 @@
-"""MoveIt (moveit_py) motion for the scripted oracle: Pilz LIN for every task move.
+"""MoveIt (moveit_py) motion for the scripted oracles: Pilz LIN for straight moves (every task move
+of oracle_obj_known), OMPL for free-space moves (oracle_obj_unknown's transits).
 
 Each move is planned as one time-parameterized trajectory and executed by JTC through MoveIt's
 FollowJointTrajectory path - smooth, like the earlier mujoco_grasp_test.py setup - instead of
@@ -50,9 +51,9 @@ class MoveItMotion:
 
     # ---- planning + execution ----------------------------------------------------------------
 
-    def _params(self, planner_id, vel_scale, acc_scale):
+    def _params(self, planner_id, vel_scale, acc_scale, pipeline="pilz_industrial_motion_planner"):
         p = PlanRequestParameters(self.robot, "plan_request_params")
-        p.planning_pipeline = "pilz_industrial_motion_planner"
+        p.planning_pipeline = pipeline
         p.planner_id = planner_id
         p.max_velocity_scaling_factor = float(vel_scale)
         p.max_acceleration_scaling_factor = float(acc_scale)
@@ -62,7 +63,7 @@ class MoveItMotion:
         self.arm.set_start_state_to_current_state()
         result = self.arm.plan(single_plan_parameters=params)
         if not result:
-            raise PlanningFailure(f"{label}: Pilz {params.planner_id} planning failed")
+            raise PlanningFailure(f"{label}: {params.planning_pipeline} {params.planner_id or 'default'} planning failed")
         jt = result.trajectory.get_robot_trajectory_msg().joint_trajectory
         idx = [jt.joint_names.index(n) for n in ARM_JOINTS]
         times = np.array([p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in jt.points])
@@ -82,6 +83,17 @@ class MoveItMotion:
             TIP_LINK, "world", cartesian_position=list(map(float, pos)), cartesian_position_tolerance=0.001,
             orientation=list(map(float, quat)), orientation_tolerance=0.01)])
         self._plan_and_execute(self._params("LIN", speed / MAX_TRANS_VEL, acc_scale), label)
+
+    def ompl(self, T_world, vel_scale=0.2, acc_scale=0.3, label="ompl"):
+        """Free-space move of gripper_tip_link to T_world with OMPL (default planner, RRTConnect),
+        collision-checked against the planning scene (the octomap with --scene sensors). The goal
+        orientation is EXACT, as for lin(): a loose one let OMPL reach the goal at an arbitrary
+        wrist orientation (see the ur_control_examples/mujoco_grasp_test.py docstring)."""
+        pos, quat = T_world[:3, 3], rot.matrix_to_quat(T_world[:3, :3])
+        self.arm.set_goal_state(motion_plan_constraints=[construct_link_constraint(
+            TIP_LINK, "world", cartesian_position=list(map(float, pos)), cartesian_position_tolerance=0.001,
+            orientation=list(map(float, quat)), orientation_tolerance=0.01)])
+        self._plan_and_execute(self._params("", vel_scale, acc_scale, pipeline="ompl"), label)
 
     # ---- desired state for the recorder ------------------------------------------------------
 

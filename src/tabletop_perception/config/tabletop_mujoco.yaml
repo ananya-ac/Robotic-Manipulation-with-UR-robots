@@ -1,0 +1,46 @@
+# tabletop_perception for the MuJoCo tabletop world (worlds/worlds/tabletop_mujoco.xml):
+# table top at z = 0.30, 0.6 x 0.6 m centered at (-0.6, 0); three 4.5 cm colored cubes.
+perception_node:
+  ros__parameters:
+    color_topic: /camera/color/image_raw
+    depth_topic: /camera/depth/image_rect_raw
+    info_topic: /camera/color/camera_info
+    world_frame: world
+    stride: 2                  # depth pixels per point (640x480 / 2 -> ~77k points before crop)
+    max_range: 1.2
+    gripper_config: robotiq_2f85.yaml   # in this package's config/, or an absolute path
+    # Self-filter: boxes (center + half extents, in the named TF frame) whose points are dropped.
+    # Gripper (+ anything it holds) and the arm links that close-up views see. Arm boxes are the
+    # links' collision-mesh bounds measured in their own frames (2026-10-15), padded 15 mm.
+    self_filter_frames: [gripper_tip_link, wrist_3_link, wrist_2_link, wrist_1_link, forearm_link, upper_arm_link]
+    self_filter_centers: [0.0, 0.0, -0.095,
+                          0.0, -0.003, 0.028,
+                          0.0, -0.002, -0.004,
+                          0.0, 0.001, -0.017,
+                          -0.186, 0.0, 0.005,
+                          -0.212, 0.0, 0.135]
+    self_filter_half_extents: [0.085, 0.045, 0.105,
+                               0.057, 0.056, 0.088,
+                               0.054, 0.070, 0.058,
+                               0.054, 0.070, 0.071,
+                               0.260, 0.073, 0.070,
+                               0.288, 0.075, 0.090]
+    # Segmentation (core/segmentation.py SegmentationConfig)
+    workspace_min: [-0.92, -0.32, 0.27]
+    workspace_max: [-0.28, 0.32, 0.60]
+    plane_distance: 0.004
+    dbscan_eps: 0.012
+    dbscan_min_points: 10
+    min_object_points: 40
+    # Palette: class names and their RGB (0..1), from the world's cube materials.
+    # The cubes are far more saturated (~0.86) than anything else in view - wood table 0.49
+    # (hue 27 deg, i.e. near red), floor 0.5 (blue), the UR's blue caps 0.39 - so classify
+    # only saturated pixels, close in hue.
+    min_saturation: 0.65
+    max_hue_dist_deg: 15.0
+    palette_names: [cube_0, cube_1, cube_2]
+    palette_rgb: [0.8, 0.1, 0.1,   0.1, 0.7, 0.1,   0.1, 0.1, 0.8]
+    # Grasping (core/grasping.py GraspConfig)
+    friction_coef: 0.5
+    table_clearance: 0.005
+    max_candidates: 20

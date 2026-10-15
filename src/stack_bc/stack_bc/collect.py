@@ -1,6 +1,7 @@
 """Collect scripted stacking demonstrations into a zarr ReplayBuffer (sim must be running).
 
   python3 -m stack_bc.collect --out ~/data/stack_bc/debug.zarr --episodes 200 [--seed 0] [--max-attempts N]
+      [--oracle obj_unknown]   # perception-driven oracle (see oracle_unknown.py); implies --scene sensors
       [--scene sensors]   # plan against a wrist-depth octomap; needs
                           # ros2 launch ur_gripper_sim_moveit_config ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85 sensors:=true
 
@@ -31,6 +32,9 @@ from stack_bc.executor import EEExecutor
 from stack_bc.gripper import WIDTH_OPEN
 from stack_bc.motion import MoveItMotion, PlanningFailure
 from stack_bc.oracle import OracleFailure, ScriptedStackOracle
+from stack_bc.oracle_unknown import PerceptionStackOracle
+from stack_bc.active_scan import ActiveScanner
+from stack_bc.perception_client import PerceptionClient
 from stack_bc.recorder import EpisodeBuffer, ReplayWriter
 from stack_bc.runtime import SimNode
 from stack_bc.scene_sensing import SceneManager
@@ -50,9 +54,11 @@ SCAN_MOVE_TIME = 2.0          # s per unrecorded joint move to / from task.SCAN_
 class TickRecorder(threading.Thread):
     """Samples (observation, desired action) on a fixed 10 Hz sim-time grid until stopped."""
 
-    def __init__(self, sim, env, motion, gripper, buf):
+    def __init__(self, sim, env, motion, gripper, buf, perceived=None):
+        """perceived: optional callable -> the oracle's perceived object poses (logged per tick)."""
         super().__init__(daemon=True)
         self.sim, self.env, self.motion, self.gripper, self.buf = sim, env, motion, gripper, buf
+        self.perceived = perceived
         self._halt = threading.Event()  # not "_stop": that name is Thread-internal
         self.irregular, self.worst = 0, 0.0
         self.error = None
@@ -71,7 +77,8 @@ class TickRecorder(threading.Thread):
                     self.irregular += 1
                 q_des = self.motion.desired_q(t_next + DT)
                 T_des = self.env.kin.fk_world(q_des) if q_des is not None else snap.ee
-                self.buf.record(snap, T_des, self.gripper.width_cmd)
+                self.buf.record(snap, T_des, self.gripper.width_cmd,
+                                self.perceived() if self.perceived else None)
                 t_next += DT
         except Exception as exc:  # surface recorder crashes to the episode loop
             self.error = exc
@@ -92,7 +99,9 @@ def scan_scene(sim, ex, scene):
     sim.sleep(SCAN_MOVE_TIME + 0.3)
 
 
-def home_and_reset(sim, env, motion, ex, rng, scene=None):
+def home_and_reset(sim, env, motion, ex, rng, scene=None, scanner=None):
+    """Reset the world (unrecorded). scanner (oracle_obj_unknown): multi-view scan instead of the
+    plain octomap scan; returns its {name: Perceived}."""
     snap = env.snapshot()
     if np.max(np.abs(snap.q_arm - task.HOME_Q)) > 1e-3:
         ex.move_joints(task.HOME_Q, 2.5)  # unrecorded; see motion.py on why not MoveIt PTP
@@ -105,22 +114,37 @@ def home_and_reset(sim, env, motion, ex, rng, scene=None):
     env.reset_world(xy, yaw)
     motion.forget()
     sim.sleep(0.5)  # contacts settle
+    if scanner is not None:
+        return scanner.scan()
     if scene is not None:
         scan_scene(sim, ex, scene)
+    return None
 
 
-def run_episode(sim, env, motion, ex, seed, scene=None):
+def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception=None):
     rng = np.random.default_rng(seed)
-    home_and_reset(sim, env, motion, ex, rng, scene)
-    order = [int(i) for i in rng.permutation(task.N_CUBES)]
+    scan_error = None
+    try:
+        perceived = home_and_reset(sim, env, motion, ex, rng, scene, scanner)
+    except (RuntimeError, PlanningFailure) as exc:
+        if scanner is None:
+            raise
+        perceived, scan_error = {}, exc        # the episode fails below; the run continues
+    order = [int(i) for i in rng.permutation(task.N_CUBES)]   # after sample_cubes: same seeds -> same episodes
     buf = EpisodeBuffer(env.model)
-    oracle = ScriptedStackOracle(sim, env, motion, ex, scene)
-    rec = TickRecorder(sim, env, motion, ex, buf)
+    if scanner is None:
+        oracle = ScriptedStackOracle(sim, env, motion, ex, scene)
+        rec = TickRecorder(sim, env, motion, ex, buf)
+    else:
+        oracle = PerceptionStackOracle(sim, env, motion, ex, scene, perception, perceived)
+        rec = TickRecorder(sim, env, motion, ex, buf, perceived=oracle.perceived_state)
     rec.start()
     t_start = sim.now()
 
     success, reason = False, "ok"
     try:
+        if scan_error is not None:
+            raise OracleFailure(f"scan: {scan_error}")
         oracle.run(order)
         hold, t_end = 0, sim.now() + POST_TASK_TIME
         while sim.now() < t_end:
@@ -152,6 +176,10 @@ def main():
     parser.add_argument("--max-attempts", type=int, default=None, help="give up after this many attempts "
                         "(default: 2x --episodes)")
     parser.add_argument("--seed", type=int, default=0, help="first seed for a NEW dataset (ignored on resume)")
+    parser.add_argument("--oracle", choices=("obj_known", "obj_unknown"), default="obj_known",
+                        help="obj_known: ground-truth object poses (the original oracle); obj_unknown: "
+                        "multi-view perception + antipodal grasps + OMPL (implies --scene sensors; needs "
+                        "`ros2 launch tabletop_perception perception.launch.py`)")
     parser.add_argument("--scene", choices=("none", "sensors"), default="none",
                         help="MoveIt collision world: none (self-collision only) or sensors (wrist-depth "
                         "octomap; needs `ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85 sensors:=true`)")
@@ -160,7 +188,9 @@ def main():
 
     out = os.path.expanduser(args.out)
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    writer = ReplayWriter(out)
+    if args.oracle == "obj_unknown":
+        args.scene = "sensors"
+    writer = ReplayWriter(out, oracle=args.oracle)
     writer.truncate_partial()
     seed = int(writer.root.attrs.get("next_seed", args.seed))
 
@@ -172,11 +202,15 @@ def main():
         raise RuntimeError("no /joint_states or cube poses")
     motion = MoveItMotion(env.urdf, sim.now, mirror_scene=args.scene == "sensors")
     scene = SceneManager(sim.node, env.urdf, motion.scene_monitor) if args.scene == "sensors" else None
+    perception = scanner = None
+    if args.oracle == "obj_unknown":
+        perception = PerceptionClient(sim.node)
+        scanner = ActiveScanner(sim, env, motion, ex, scene, perception)
 
     added, attempts = 0, 0
     while added < args.episodes and attempts < max_attempts:
         t0 = time.time()
-        buf, success, reason, order, rec = run_episode(sim, env, motion, ex, seed, scene)
+        buf, success, reason, order, rec = run_episode(sim, env, motion, ex, seed, scene, scanner, perception)
         attempts += 1
         timing = f" [{rec.irregular} off-slot ticks, worst {rec.worst * 1000:.0f} ms]" if rec.irregular else ""
         if success:

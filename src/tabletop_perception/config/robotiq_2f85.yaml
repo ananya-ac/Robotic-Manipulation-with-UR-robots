@@ -1,0 +1,21 @@
+# Robotiq 2F-85 in its gripper_tip_link frame (see core/gripper.py for the convention:
+# fingers close along x, +z = approach, palm at negative z). Boxes measured from the MuJoCo
+# collision meshes with the gripper OPEN (ur5e_2f85_camera_mujoco model, 2026-10-15):
+#   finger tips  x [0.0425, 0.0737]  y [-0.0143, 0.0127]  z [-0.0687, -0.0117]   (open)
+#   knuckles     x [0.023, 0.0762]   y [-0.0144, 0.0136]  z [-0.1161, -0.0567]
+#   inner knuckle x [0.0067, 0.0559] y [-0.0174, 0.0176]  z [-0.1055, -0.0502]
+# Closing moves the tips inward AND down: at a 45 mm grip they reach z = -0.0006, fully closed
+# z = +0.0018 - hence finger_reach and the fingers' z upper bound of +0.002.
+stroke: 0.085
+contact_depth: 0.0      # contacts at the tip origin's height: the validated oracle grasps a cube
+                        # with gripper_tip_link at the cube center
+finger_reach: 0.002     # lowest finger point when closed, below the tip along the approach
+closing_region:         # swept between the pads while closing (other objects must not be here)
+  - [-0.0425, -0.0145, -0.058]
+  - [0.0425, 0.0145, 0.002]
+bodies:
+  - box: [[0.0425, -0.0150, -0.0690], [0.0760, 0.0150, 0.0020]]   # finger (open), both sides
+    mirror_x: true
+  - box: [[0.0060, -0.0180, -0.1170], [0.0770, 0.0180, -0.0500]]  # knuckle linkage, both sides
+    mirror_x: true
+  - box: [[-0.0450, -0.0350, -0.1900], [0.0450, 0.0350, -0.1170]] # palm / base + coupler

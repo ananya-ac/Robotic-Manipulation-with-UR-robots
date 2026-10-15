@@ -26,6 +26,9 @@
   <exec_depend>moveit_msgs</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>
   <exec_depend>ur_gripper_sim_moveit_config</exec_depend>
+  <!-- oracle_obj_unknown: perception node client + view generation -->
+  <exec_depend>tabletop_perception</exec_depend>
+  <exec_depend>tabletop_perception_msgs</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

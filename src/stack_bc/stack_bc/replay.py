@@ -65,11 +65,15 @@ def render(model, qpos_rows, width, height):
     cam.type = mujoco.mjtCamera.mjCAMERA_FREE
     cam.lookat[:] = CAMERA["lookat"]
     cam.distance, cam.azimuth, cam.elevation = CAMERA["distance"], CAMERA["azimuth"], CAMERA["elevation"]
+    # Hide sites: the URDF->MJCF conversion makes one per link, drawn as grey spheres by default.
+    # gripper_tip_link's sits in open air between the fingers and showed up as a "silver ball".
+    opt = mujoco.MjvOption()
+    opt.sitegroup[:] = 0
     with mujoco.Renderer(model, height=height, width=width) as renderer:
         for q in qpos_rows:
             data.qpos[:] = q
             mujoco.mj_forward(model, data)
-            renderer.update_scene(data, camera=cam)
+            renderer.update_scene(data, camera=cam, scene_option=opt)
             yield renderer.render()
 
 
