@@ -44,7 +44,7 @@ from stack_bc.oracle import OracleFailure, ScriptedStackOracle
 from stack_bc.oracle_unknown import PerceptionStackOracle
 from stack_bc.active_scan import ActiveScanner
 from stack_bc.perception_client import PerceptionClient
-from stack_bc.camera import IMAGE_TOPIC, WristCamera
+from stack_bc.camera import CAMERA_SETTLE, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
 from stack_bc.randomize import ColorRandomizer, sample_colors
 from stack_bc.recorder import EpisodeBuffer, ReplayWriter
 from stack_bc.runtime import SimNode
@@ -60,14 +60,10 @@ MAX_EPISODE_TIME = 120.0      # s sim time
 # with more than MAX_IRREGULAR_TICKS are marked failed ("timing") and filtered out of training.
 TICK_TOLERANCE = 0.02
 MAX_IRREGULAR_TICKS = 3
-SCAN_MOVE_TIME = 2.0          # s per unrecorded joint move to / from task.SCAN_Q (--scene sensors)
-# Image guard (--wrist-images): a tick's frame is stale if it is older than MAX_IMAGE_AGE (sim
-# time, tick stamp - frame stamp) or is the same frame the previous tick got. At the camera's
-# 20 Hz a fresh frame is <= ~0.05 s old plus publishing latency (~0.06 s measured). Episodes with
-# more than MAX_STALE_IMAGES stale ticks fail ("timing") like the tick guard above.
-MAX_IMAGE_AGE = 0.1
+SCAN_MOVE_TIME = task.SCAN_MOVE_TIME   # unrecorded joint moves to / from task.SCAN_Q
+# Image guard (--wrist-images): episodes with more than MAX_STALE_IMAGES stale wrist frames
+# (camera.MAX_IMAGE_AGE) fail ("timing") like the tick guard above.
 MAX_STALE_IMAGES = 3
-CAMERA_SETTLE = 0.5           # s at the scan pose before recording, so frame 0 is a fresh overview
 
 
 class TickRecorder(threading.Thread):

@@ -23,6 +23,11 @@ IMAGE_TOPIC = "/camera/color/image_raw"
 IMAGE_QOS = QoSProfile(depth=2, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE)
 IMAGE_SHAPE = (240, 320, 3)      # stored H, W, C (uint8 RGB)
 SOURCE_SHAPE = (480, 640)        # what the sim publishes; downsampling is an exact factor of 2
+# A tick's frame is stale if older than this (sim time, tick stamp - frame stamp) or the same frame
+# as the previous tick's. At the camera's 20 Hz a fresh frame is <= ~0.05 s old plus publishing
+# latency (measured worst ~80 ms with this reader).
+MAX_IMAGE_AGE = 0.1
+CAMERA_SETTLE = 0.5              # s at the scan pose before an image episode starts (fresh overview)
 
 
 def downsample2(rgb):

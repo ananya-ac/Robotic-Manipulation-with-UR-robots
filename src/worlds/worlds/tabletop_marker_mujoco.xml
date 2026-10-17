@@ -1,8 +1,9 @@
 <mujoco model="tabletop_marker">
   <!--
     tabletop_mujoco.xml + a stack-location marker (stack_bc's marker task: the tower must be built
-    on it). Everything else is identical to tabletop_mujoco.xml - keep the two in sync; that
-    file's comments below apply here unchanged.
+    on it) and dimmer lights (for colour domain randomization; see the <visual> comment).
+    Everything else is identical to tabletop_mujoco.xml - keep the two in sync; that file's
+    comments below apply here unchanged.
 
     stack_marker: a 7 cm white disc lying on the table, VISUAL ONLY (contype/conaffinity 0: cubes
     and fingers pass through it, physics is exactly that of tabletop_mujoco.xml). It is a free
@@ -58,7 +59,14 @@
   <statistic center="-0.5 0 0.4" extent="1.2"/>
 
   <visual>
-    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
+    <!-- Dimmer than tabletop_mujoco.xml on purpose (colour domain randomization): there, an
+         upward-facing surface seen by the wrist camera gets ambient 0.3 + headlight 0.6 +
+         directional ~0.7 = ~1.6x its colour, so any channel above ~0.6 clips at 255. Over 200
+         randomized colour sets that clipped 33% of cube, 37% of table and 68% of marker pixels,
+         and in the worst set the marker became indistinguishable from the table. Here the peak
+         gain is ~1.0 (ambient 0.25 + headlight 0.35 + directional 0.5 x ~0.87), so randomized
+         colours render as sampled; see notes/domain_randomization.md. -->
+    <headlight diffuse="0.35 0.35 0.35" ambient="0.25 0.25 0.25" specular="0.1 0.1 0.1"/>
     <global azimuth="120" elevation="-20"/>
   </visual>
 
@@ -75,7 +83,7 @@
   </asset>
 
   <worldbody>
-    <light pos="0 0 10" dir="-0.5 0.1 -0.9" directional="true" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <light pos="0 0 10" dir="-0.5 0.1 -0.9" directional="true" diffuse="0.5 0.5 0.5" specular="0.2 0.2 0.2"/>
     <geom name="floor" type="plane" size="0 0 0.01" material="groundplane" contype="1" conaffinity="0"/>
 
     <!-- Table: 0.6x0.6m top, 0.3m tall (top surface at z=0.3; was 0.4m tall/z=0.4 - lowered

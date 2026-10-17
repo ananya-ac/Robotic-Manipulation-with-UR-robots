@@ -1,0 +1,32 @@
+# UR5e cube stacking from the wrist camera (stack_bc collect --wrist-images), "overview-start":
+# the last n_obs_steps wrist frames + proprio. See dataset/stack_image_dataset.py.
+# The overview + context variant (same data, + the episode's frame 0): stack_wrist_context_image.yaml.
+name: stack_wrist_image
+
+image_shape: [3, 240, 320]
+shape_meta: &shape_meta
+  obs:
+    wrist:
+      shape: ${task.image_shape}
+      type: rgb
+    proprio:
+      shape: [10]        # EE pos3 + EE rot6d + measured gripper width
+      type: low_dim
+  action:
+    shape: [10]          # desired EE pos3 + rot6d + desired width
+
+# Rollouts run in the ROS/MuJoCo sim outside this repo, not during training.
+env_runner:
+  _target_: stack_dp.null_image_runner.NullImageRunner
+
+dataset:
+  _target_: stack_dp.stack_image_dataset.StackImageDataset
+  shape_meta: *shape_meta
+  zarr_path: ${oc.env:HOME}/data/stack_bc/wrist.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null

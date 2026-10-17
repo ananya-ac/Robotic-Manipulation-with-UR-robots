@@ -22,6 +22,9 @@ HOME_Q = np.array([1.57, -1.57, 1.26, -1.57, -1.57, 0.0])
 # table footprint covers the whole SPAWN_X x SPAWN_Y region plus a 3 cm margin. A top-down view
 # over the table center itself is out of reach at a useful height (no IK above tip z ~0.55).
 SCAN_Q = np.array([1.1143, -1.5644, 0.8427, -0.8491, -1.5708, -0.456])
+SCAN_MOVE_TIME = 2.0                  # s, unrecorded joint move to / from SCAN_Q
+# SCAN_Q is also where wrist-image episodes start (collect --wrist-images, image-policy rollouts):
+# its wrist frame is the overview of the whole spawn region.
 
 # Oracle waypoint offsets, measured on gripper_tip_link relative to the target cube center.
 HOVER_HEIGHT = 0.10                   # pre-grasp / pre-place clearance above the target

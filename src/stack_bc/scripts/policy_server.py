@@ -11,10 +11,16 @@ anywhere: running `python <script>` only adds the SCRIPT's directory to sys.path
 
 Protocol (ZMQ REQ/REP on localhost, pickled dicts - local and trusted only):
   {"cmd": "info"}               -> {"n_obs_steps", "n_action_steps", "horizon", "obs_dim", "action_dim",
-                                    "inference_steps", "ckpt"}
+                                    "obs_keys", "inference_steps", "ckpt"}
   {"cmd": "reset"}              -> {"ok": True}   start of episode: clears recurrent state (LSTM-GMM)
-  {"cmd": "act", "obs": (To, obs_dim) float32}
-                                -> {"action": (Ta, action_dim) float32, "latency_s": float}
+  {"cmd": "act", "obs": ...}    -> {"action": (Ta, action_dim) float32, "latency_s": float}
+    low-dim checkpoints: "obs" = (To, obs_dim) float32; info["obs_keys"] is None
+    image checkpoints (cfg has shape_meta; stack_wrist_image / stack_wrist_context_image):
+      "obs" = {key: array} for every key in info["obs_keys"] ({key: {"shape", "type"}}):
+        rgb keys     (To, H, W, 3) uint8, as recorded (data/wrist_rgb); converted here to float
+                     (To, 3, H, W) in [0, 1] exactly as stack_image_dataset does
+        low_dim keys (To, D) float32 (proprio = spaces.state_vector(snap)[:10])
+      info["obs_dim"] is None.
 "action" is the policy's executable slice (predictions To-1 .. To-1+Ta, un-normalized), i.e.
 exactly what the paper executes before re-planning. Works for both the diffusion policy (To=2, Ta=8)
 and the LSTM-GMM baseline (To=1, Ta=1, stateful - hence "reset").
@@ -49,6 +55,33 @@ def load_policy(ckpt_path, device, use_ema=True):
     return policy, cfg
 
 
+def obs_spec(cfg):
+    """{key: {"shape": tuple, "type": "rgb" | "low_dim"}} for image checkpoints, None for low-dim."""
+    if "shape_meta" not in cfg:
+        return None
+    return {k: {"shape": tuple(v.shape), "type": v.get("type", "low_dim")} for k, v in cfg.shape_meta.obs.items()}
+
+
+def image_obs_tensors(obs, spec, n_obs_steps, device):
+    """Validate a client's dict observation and convert it to the policy's batched input."""
+    if set(obs) != set(spec):
+        raise ValueError(f"obs keys {sorted(obs)}, expected {sorted(spec)}")
+    out = {}
+    for key, s in spec.items():
+        a = np.asarray(obs[key])
+        if s["type"] == "rgb":
+            c, h, w = s["shape"]
+            if a.shape != (n_obs_steps, h, w, c) or a.dtype != np.uint8:
+                raise ValueError(f"{key}: got {a.shape} {a.dtype}, expected ({n_obs_steps}, {h}, {w}, {c}) uint8")
+            a = np.moveaxis(a, -1, 1).astype(np.float32) / 255.0
+        else:
+            if a.shape != (n_obs_steps,) + s["shape"]:
+                raise ValueError(f"{key}: got {a.shape}, expected {(n_obs_steps,) + s['shape']}")
+            a = a.astype(np.float32)
+        out[key] = torch.from_numpy(a)[None].to(device)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ckpt", required=True)
@@ -72,14 +105,23 @@ def main():
             from diffusers.schedulers.scheduling_ddim import DDIMScheduler
             policy.noise_scheduler = DDIMScheduler.from_config(policy.noise_scheduler.config)
         policy.num_inference_steps = args.inference_steps
-    info = dict(n_obs_steps=int(cfg.n_obs_steps), n_action_steps=int(cfg.n_action_steps),
-                horizon=int(cfg.horizon), obs_dim=int(cfg.obs_dim), action_dim=int(cfg.action_dim),
-                inference_steps=int(args.inference_steps) if is_diffusion else None,
+    spec = obs_spec(cfg)
+    To = int(cfg.n_obs_steps)
+    info = dict(n_obs_steps=To, n_action_steps=int(cfg.n_action_steps), horizon=int(cfg.horizon),
+                obs_dim=None if spec else int(cfg.obs_dim),
+                action_dim=int(cfg.shape_meta.action.shape[0]) if spec else int(cfg.action_dim),
+                obs_keys=spec, inference_steps=int(args.inference_steps) if is_diffusion else None,
                 ckpt=os.path.abspath(args.ckpt))
 
     # Warm-up pass (CUDA init/kernels) so the first real request isn't slow.
     with torch.no_grad():
-        policy.predict_action({"obs": torch.zeros(1, info["n_obs_steps"], info["obs_dim"], device=args.device)})
+        if spec:
+            zeros = {k: np.zeros((To,) + ((s["shape"][1], s["shape"][2], s["shape"][0]) if s["type"] == "rgb"
+                                          else s["shape"]), dtype=np.uint8 if s["type"] == "rgb" else np.float32)
+                     for k, s in spec.items()}
+            policy.predict_action(image_obs_tensors(zeros, spec, To, args.device))
+        else:
+            policy.predict_action({"obs": torch.zeros(1, To, info["obs_dim"], device=args.device)})
     policy.reset()  # recurrent policies (LSTM-GMM) must not start episodes with warm-up state
 
     sock = zmq.Context().socket(zmq.REP)
@@ -97,13 +139,21 @@ def main():
         if req.get("cmd") != "act":
             sock.send_pyobj({"error": f"unknown cmd {req.get('cmd')!r}"})
             continue
-        obs = np.asarray(req["obs"], dtype=np.float32)
-        if obs.shape != (info["n_obs_steps"], info["obs_dim"]):
-            sock.send_pyobj({"error": f"obs shape {obs.shape}, expected {(info['n_obs_steps'], info['obs_dim'])}"})
-            continue
+        if spec:
+            try:
+                batch = image_obs_tensors(req["obs"], spec, To, args.device)
+            except (ValueError, TypeError) as exc:
+                sock.send_pyobj({"error": str(exc)})
+                continue
+        else:
+            obs = np.asarray(req["obs"], dtype=np.float32)
+            if obs.shape != (To, info["obs_dim"]):
+                sock.send_pyobj({"error": f"obs shape {obs.shape}, expected {(To, info['obs_dim'])}"})
+                continue
+            batch = {"obs": torch.from_numpy(obs)[None].to(args.device)}
         t0 = time.perf_counter()
         with torch.no_grad():
-            out = policy.predict_action({"obs": torch.from_numpy(obs)[None].to(args.device)})
+            out = policy.predict_action(batch)
         action = out["action"][0].cpu().numpy().astype(np.float32)
         sock.send_pyobj({"action": action, "latency_s": time.perf_counter() - t0})
 
