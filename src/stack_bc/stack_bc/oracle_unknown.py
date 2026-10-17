@@ -26,7 +26,7 @@ from stack_bc import rotations as rot
 from stack_bc import task
 from stack_bc.gripper import WIDTH_CLOSED, WIDTH_OPEN
 from stack_bc.motion import PlanningFailure
-from stack_bc.oracle import V_APPROACH, V_LIFT, OracleFailure, ScriptedStackOracle
+from stack_bc.oracle import OMPL_VEL, V_APPROACH, V_LIFT, OracleFailure, ScriptedStackOracle
 from stack_bc.perception_client import Perceived
 
 PREGRASP = 0.10            # m back along the approach
@@ -34,7 +34,6 @@ GATE_WIDTH_TOL = 0.012     # m, measured gap vs the grasp's contact width
 GATE_SLIP_TOL = 0.003      # m, gap change during the lift
 MAX_GRASPS_TRIED = 6       # candidates tried for planning per pick attempt
 MAX_PICK_ATTEMPTS = 2
-OMPL_VEL = 0.2             # joint velocity scaling for OMPL transits
 
 
 def _flip(T):

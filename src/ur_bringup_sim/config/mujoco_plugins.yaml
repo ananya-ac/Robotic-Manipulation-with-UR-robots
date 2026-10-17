@@ -27,3 +27,22 @@
         # its grasp/success checks compare cube and gripper motion - keep the staleness of the
         # latest cached pose well under one tick.
         publish_rate: 100.0
+      # Wrist camera, configured explicitly for its rate. Without this entry the CameraPlugin
+      # auto-registers at its default 5 Hz, which measured 3.3 Hz delivered (stamp gaps 0.2-0.8 s,
+      # sim RTF 1.0) - too slow for stack_bc's 10 Hz recorder (wrist images). 20 Hz keeps the
+      # newest frame <= ~50 ms old at every tick even with occasional drops. Topics and frame are
+      # the ones the URDF <sensor> block gives the auto-configured plugin
+      # (ur5e_2f85_camera_mujoco.urdf.xacro); the key under it is the MJCF camera name.
+      mujoco_camera_plugin:
+        type: "mujoco_ros2_control_plugins/CameraPlugin"
+        camera_publish_rate: 20.0
+        camera:
+          policy: streaming
+          frame_name: camera_color_toein_frame
+          info_topic: /camera/color/camera_info
+          image_topic: /camera/color/image_raw
+          depth_topic: /camera/depth/image_rect_raw
+      # Visual domain randomization (src/mujoco_dr_plugin): recolours MJCF materials on request
+      # via /color_randomizer/set_colors. Idle (no effect on the scene) until called.
+      color_randomizer:
+        type: "mujoco_dr_plugin/ColorRandomizerPlugin"

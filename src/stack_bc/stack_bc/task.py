@@ -40,3 +40,12 @@ SPAWN_X = (-0.58, -0.36)
 SPAWN_Y = (-0.22, 0.22)
 MIN_CUBE_SPACING = 0.08               # center-to-center; leaves finger clearance around each cube
 N_CUBES = len(CUBE_NAMES)
+
+# Stack-location marker (worlds/worlds/tabletop_marker_mujoco.xml; mirror its geometry): a visual-
+# only disc the tower must be built on. Sampled in the same IK-feasible spawn region as the cubes
+# (any spot there passes every stack level) and MIN_CUBE_SPACING from every cube, so the base can
+# be placed on it without the fingers hitting a neighbour.
+MARKER_NAME = "stack_marker"
+MARKER_RADIUS = 0.035
+MARKER_Z = TABLE_TOP_Z + 0.0007       # disc center (half-height 0.5 mm, just above the table)
+MARKER_XY_TOL = 0.01                  # base cube center to marker center, for success

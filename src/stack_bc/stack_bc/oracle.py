@@ -1,4 +1,4 @@
-"""Scripted pick-and-stack expert, executed through MoveIt (Pilz LIN for every move).
+"""Scripted pick-and-stack expert, executed through MoveIt (Pilz LIN, optionally OMPL transits).
 
 Runs sequentially (plan -> execute -> check -> next move) while the recorder samples a 10 Hz
 stream in its own thread. Every move is a straight top-down line (tip z -> world -z) between
@@ -9,6 +9,13 @@ Per cube placed on the stack (stack order = a random permutation; order[0] is th
   rise/transit at a safe height -> hover over the cube -> slow descend -> close (width 0, force-
   limited) -> GRASP GATE -> lift -> transit at max(pick hover, place hover) -> hover over the stack
   -> slow descend to contact + clearance -> open -> retreat up.
+
+transit="ompl" (collect --transit ompl): each transit (rise -> over -> down above) is instead ONE
+OMPL move straight to the hover pose, planned against scene_gt's ground-truth world, so demos show
+the planner's path variety; descend / close / gate / lift / place / retreat stay Pilz LIN.
+
+The waypoint geometry (pick_poses, place_pose) is module-level so the DAgger expert (expert.py)
+computes exactly the same targets from a state.
 
 Grasp gate (never log a failed grasp as expert data): after the gripper stops closing, the measured
 fingertip gap must be consistent with a cube between the pads, and a 1.5 cm test lift must bring
@@ -33,6 +40,7 @@ GRASP_WIDTH_RANGE = (task.CUBE_SIZE - 0.012, task.CUBE_SIZE + 0.004)  # measured
 GRIPPER_SETTLE = 0.3   # s of sim time with |d width| < 0.5 mm per 0.1 s -> gripper stopped
 GRIPPER_TIMEOUT = 2.0  # s
 MAX_GRASP_ATTEMPTS = 2
+OMPL_VEL = 0.2         # joint velocity scaling for OMPL transits (also oracle_obj_unknown's)
 
 
 class OracleFailure(RuntimeError):
@@ -44,28 +52,67 @@ def canonical_grasp_yaw(cube_R, reference_yaw):
     return reference_yaw + rot.wrap_to_quarter_turn(rot.yaw_of(cube_R) - reference_yaw)
 
 
+def pick_poses(cube_pos, cube_R, reference_yaw):
+    """(hover, grasp) tip poses for a top-down grasp of a cube, faces aligned, yaw nearest
+    reference_yaw (the current wrist yaw)."""
+    grasp = rot.pose_matrix(cube_pos, rot.top_down_grasp(canonical_grasp_yaw(cube_R, reference_yaw)))
+    hover = grasp.copy()
+    hover[2, 3] += task.HOVER_HEIGHT
+    return hover, grasp
+
+
+def place_pose(ee, carried_pos, carried_R, base_pos, base_R, level):
+    """Tip pose that releases the carried cube centered on the cube below (base_*), faces aligned
+    with it, PLACE_CLEARANCE above resting contact at stack `level` (1 = on the base)."""
+    # Carried cube's pose relative to the tip, measured now (it may have settled in the grip).
+    T_tip_cube = np.linalg.inv(ee) @ rot.pose_matrix(carried_pos, carried_R)
+    # Desired carried-cube pose: faces aligned with the cube below (the aligned yaw nearest the
+    # carried cube's current yaw -> smallest wrist turn).
+    cube_yaw_goal = canonical_grasp_yaw(base_R, rot.yaw_of(carried_R))
+    R_cube_goal = rot.rot_z(cube_yaw_goal - rot.yaw_of(carried_R)) @ carried_R
+    target_center_z = task.CUBE_REST_Z + level * task.CUBE_SIZE
+    T_cube_goal = rot.pose_matrix([base_pos[0], base_pos[1], target_center_z + task.PLACE_CLEARANCE], R_cube_goal)
+    T_place = T_cube_goal @ np.linalg.inv(T_tip_cube)
+    T_place[:3, :3] = rot.top_down_grasp(rot.yaw_of(T_place[:3, :3]))  # keep the tip exactly vertical
+    return T_place
+
+
 class ScriptedStackOracle:
-    def __init__(self, sim, env, motion, gripper, scene=None):
+    def __init__(self, sim, env, motion, gripper, scene=None, transit="lin"):
         """gripper: an EEExecutor (only its set_width is used - force-limited GripperCommand).
-        scene: a scene_sensing.SceneManager when planning against the sensor-built octomap."""
+        scene: a scene_sensing.SceneManager (sensor-built octomap) or scene_gt.GTScene.
+        transit: "lin" (rise / over / down, all Pilz LIN) or "ompl" (one OMPL move; needs a
+        scene to plan against)."""
+        if transit not in ("lin", "ompl"):
+            raise ValueError(f"transit must be 'lin' or 'ompl', not {transit!r}")
+        if transit == "ompl" and scene is None:
+            raise ValueError("transit='ompl' needs a collision scene (scene_gt.GTScene)")
         self.sim, self.env, self.motion, self.gripper = sim, env, motion, gripper
         self.scene = scene
+        self.transit = transit
         self.phase = "start"
         self.cmd = None       # last commanded tip pose (4x4 world)
         self.grasps = []
 
-    def run(self, order):
-        """Stack cubes in `order` (base first). Raises OracleFailure; sets phase 'done' on success."""
+    def run(self, order, target_xy=None):
+        """Stack cubes in `order` (base first). target_xy (marker world): first move the base cube
+        onto the stack-location marker, then stack on it. Raises OracleFailure; sets phase
+        'done' on success."""
         self.cmd = self.env.snapshot().ee.copy()
+        if target_xy is not None:
+            self._pick_with_retries(order[0])
+            self._place(order[0], None, level=0, target_xy=target_xy)
         for k in range(1, len(order)):
             src, dst = order[k], order[k - 1]
-            for attempt in range(MAX_GRASP_ATTEMPTS):
-                if self._pick(src):
-                    break
-                if attempt == MAX_GRASP_ATTEMPTS - 1:
-                    raise OracleFailure(f"grasp of cube {src} failed {MAX_GRASP_ATTEMPTS}x")
+            self._pick_with_retries(src)
             self._place(src, dst, level=k)
         self.phase = "done"
+
+    def _pick_with_retries(self, src):
+        for attempt in range(MAX_GRASP_ATTEMPTS):
+            if self._pick(src):
+                return
+        raise OracleFailure(f"grasp of cube {src} failed {MAX_GRASP_ATTEMPTS}x")
 
     # ---- primitives --------------------------------------------------------------------------
 
@@ -73,13 +120,25 @@ class ScriptedStackOracle:
         dist = np.linalg.norm(T_goal[:3, 3] - self.cmd[:3, 3])
         if dist < MIN_MOVE and rot.angle_between(T_goal[:3, :3], self.cmd[:3, :3]) < 1e-3:
             return
+        self._refresh_scene()
         self.motion.lin(T_goal, speed, label=f"{self.phase}/{label}")
         self.cmd = T_goal.copy()
+
+    def _refresh_scene(self):
+        if self.scene is not None:
+            self.scene.refresh()
 
     def _transit(self, T_goal, via_z, contact_rise=False):
         """Rise to via_z, move horizontally (rotating) to above the goal, descend to the goal.
         contact_rise: the vertical rise starts in contact (carried cube still overlapping the
-        voxels of the spot it was lifted from), so plan it with octomap contact allowed."""
+        voxels of the spot it was lifted from), so plan it with octomap contact allowed.
+        transit="ompl": one OMPL move to T_goal instead (via_z / contact_rise unused - the GT
+        world has the held cube attached, not left behind as voxels)."""
+        if self.transit == "ompl":
+            self._refresh_scene()
+            self.motion.ompl(T_goal, vel_scale=OMPL_VEL, label=f"{self.phase}/transit")
+            self.cmd = T_goal.copy()
+            return
         up = self.cmd.copy()
         up[2, 3] = max(via_z, self.cmd[2, 3])
         with self._contact() if contact_rise else nullcontext():
@@ -111,14 +170,12 @@ class ScriptedStackOracle:
     def _pick(self, src):
         self.phase = f"pick{src}"
         snap = self.env.snapshot()
-        yaw = canonical_grasp_yaw(snap.cube_rot[src], rot.yaw_of(self.cmd[:3, :3]))
-        R_grasp = rot.top_down_grasp(yaw)
-        hover = rot.pose_matrix(snap.cube_pos[src] + [0, 0, task.HOVER_HEIGHT], R_grasp)
+        hover, grasp = pick_poses(snap.cube_pos[src], snap.cube_rot[src], rot.yaw_of(self.cmd[:3, :3]))
         self._transit(hover, hover[2, 3])
 
         with self._contact():
             cube_p = self.env.snapshot().cube_pos[src]  # re-read: anything nudged during the approach
-            self._move(rot.pose_matrix(cube_p, R_grasp), V_APPROACH, "descend")
+            self._move(rot.pose_matrix(cube_p, grasp[:3, :3]), V_APPROACH, "descend")
             held_width = self._set_gripper(WIDTH_CLOSED).width
 
             before = self.env.snapshot()
@@ -146,21 +203,17 @@ class ScriptedStackOracle:
             self.scene.attach_cube(np.eye(4))
         return ok
 
-    def _place(self, src, dst, level):
-        self.phase = f"place{src}->{dst}"
+    def _place(self, src, dst, level, target_xy=None):
+        """Place the carried cube src on cube dst at stack `level`, or (target_xy, level 0) on the
+        stack-location marker - a circle, so the cube keeps its own yaw (no wrist turn)."""
         snap = self.env.snapshot()
-        # Carried cube's pose relative to the tip, measured now (it may have settled in the grip).
-        T_tip_cube = np.linalg.inv(snap.ee) @ rot.pose_matrix(snap.cube_pos[src], snap.cube_rot[src])
-        base_p, base_R = snap.cube_pos[dst], snap.cube_rot[dst]
-        # Desired carried-cube pose: centered over the stack, faces aligned with the cube below
-        # (the aligned yaw nearest the carried cube's current yaw -> smallest wrist turn).
-        carried_R = snap.cube_rot[src]
-        cube_yaw_goal = canonical_grasp_yaw(base_R, rot.yaw_of(carried_R))
-        R_cube_goal = rot.rot_z(cube_yaw_goal - rot.yaw_of(carried_R)) @ carried_R
-        target_center_z = task.CUBE_REST_Z + level * task.CUBE_SIZE
-        T_cube_goal = rot.pose_matrix([base_p[0], base_p[1], target_center_z + task.PLACE_CLEARANCE], R_cube_goal)
-        T_place = T_cube_goal @ np.linalg.inv(T_tip_cube)
-        T_place[:3, :3] = rot.top_down_grasp(rot.yaw_of(T_place[:3, :3]))  # keep the tip exactly vertical
+        if target_xy is None:
+            self.phase = f"place{src}->{dst}"
+            base_p, base_R = snap.cube_pos[dst], snap.cube_rot[dst]
+        else:
+            self.phase = f"place{src}->marker"
+            base_p, base_R = np.asarray(target_xy, dtype=float), snap.cube_rot[src]
+        T_place = place_pose(snap.ee, snap.cube_pos[src], snap.cube_rot[src], base_p, base_R, level)
         hover = T_place.copy()
         hover[2, 3] += task.HOVER_HEIGHT
         # Carry at max(pick hover, place hover): cmd is at the test-lift height (grasp + TEST_LIFT).

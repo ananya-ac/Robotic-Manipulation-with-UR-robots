@@ -29,7 +29,8 @@ import zmq
 
 from stack_bc import rotations as rot
 from stack_bc import spaces, task
-from stack_bc.env import StackEnv, stack_success
+from stack_bc.env import StackEnv, has_marker, stack_success
+from stack_bc.randomize import ColorRandomizer
 from stack_bc.executor import EEExecutor, IKFailure
 from stack_bc.gripper import WIDTH_CLOSED, WIDTH_OPEN
 from stack_bc.recorder import EpisodeBuffer, ReplayWriter
@@ -41,7 +42,9 @@ GRIPPER_THRESHOLD = (WIDTH_OPEN + WIDTH_CLOSED) / 2
 
 
 def initial_layout(dataset_path, episode, model):
-    """(xy (N,2), yaw (N,), demo stack order) of a recorded episode's first tick."""
+    """(xy (N,2), yaw (N,), demo stack order, marker xy or None, episode rgba or None) of a
+    recorded episode's first tick. The marker is only reproduced when the live sim is a marker
+    world too."""
     root = zarr.open(os.path.expanduser(dataset_path), "r")
     ends = root["meta/episode_ends"][:]
     if not 0 <= episode < len(ends):
@@ -54,8 +57,14 @@ def initial_layout(dataset_path, episode, model):
         w, x, y, z = qpos[adr + 3:adr + 7]                    # MuJoCo free joint: pos + quat wxyz
         xy.append(qpos[adr:adr + 2])
         yaw.append(rot.yaw_of(rot.quat_to_matrix([x, y, z, w])))
-    order = [int(i) for i in root["meta/episode_order"][episode]] if "episode_order" in root["meta"] else None
-    return np.array(xy), np.array(yaw), order
+    meta = root["meta"]
+    order = [int(i) for i in meta["episode_order"][episode]] if "episode_order" in meta else None
+    marker_xy = np.asarray(meta["episode_target"][episode]) if "episode_target" in meta else None
+    if has_marker(model) != (marker_xy is not None):
+        raise ValueError(f"{dataset_path} {'has' if marker_xy is not None else 'has no'} stack marker but the "
+                         "running sim's world doesn't match (robot_mujoco.launch.py world:=...)")
+    rgba = np.asarray(meta["episode_rgba"][episode]) if "episode_rgba" in meta else None
+    return np.array(xy), np.array(yaw), order, marker_xy, rgba
 
 
 class PolicyClient:
@@ -87,16 +96,20 @@ class PolicyClient:
         return rep["action"], rep["latency_s"]
 
 
-def any_order_success(snap):
-    return any(stack_success(snap, list(p)) for p in itertools.permutations(range(task.N_CUBES)))
+def any_order_success(snap, target_xy=None):
+    return any(stack_success(snap, list(p), target_xy=target_xy) for p in itertools.permutations(range(task.N_CUBES)))
 
 
-def rollout(sim, env, ex, client, info, xy, yaw, max_time, buf=None, log=print):
+def rollout(sim, env, ex, client, info, xy, yaw, max_time, buf=None, log=print, marker_xy=None, colors=None):
+    """marker_xy: stack-location marker (marker world; success requires the tower on it).
+    colors: (randomize.ColorRandomizer, rgba) applied after the reset."""
     To, Ta = info["n_obs_steps"], info["n_action_steps"]
     ex.move_joints(task.HOME_Q, 2.5)
     ex.set_width(WIDTH_OPEN, force=True)
     sim.sleep(2.8)
-    env.reset_world(xy, yaw)
+    env.reset_world(xy, yaw, marker_xy)
+    if colors is not None:
+        colors[0].apply(colors[1])
     sim.sleep(0.5)
     snap = env.snapshot()
     ex.sync(snap.q_arm, snap.ee)
@@ -127,7 +140,7 @@ def rollout(sim, env, ex, client, info, xy, yaw, max_time, buf=None, log=print):
         if buf is not None:
             buf.record(snap, targets[i], width)
 
-        hold = hold + 1 if any_order_success(snap) else 0
+        hold = hold + 1 if any_order_success(snap, marker_xy) else 0
         if hold >= SUCCESS_HOLD_TICKS:
             success, reason = True, "ok"
             break
@@ -159,14 +172,23 @@ def main():
     writer = ReplayWriter(os.path.expanduser(args.record)) if args.record else None
 
     results = []
+    randomizer = None
     for ep in args.episode:
-        xy, yaw, demo_order = initial_layout(args.dataset, ep, env.model)
+        xy, yaw, demo_order, marker_xy, rgba = initial_layout(args.dataset, ep, env.model)
+        if rgba is not None and randomizer is None:
+            randomizer = ColorRandomizer(sim.node)
         buf = EpisodeBuffer(env.model) if writer else None
         t0 = time.time()
-        res = rollout(sim, env, ex, client, info, xy, yaw, args.max_time, buf)
+        res = rollout(sim, env, ex, client, info, xy, yaw, args.max_time, buf, marker_xy=marker_xy,
+                      colors=(randomizer, rgba) if rgba is not None else None)
         results.append(res)
         if writer and len(buf):
-            writer.append_episode(buf.arrays(), res["success"], ep, demo_order or [-1] * task.N_CUBES)
+            extra_meta = {}
+            if marker_xy is not None:
+                extra_meta["episode_target"] = marker_xy
+            if rgba is not None:
+                extra_meta["episode_rgba"] = rgba
+            writer.append_episode(buf.arrays(), res["success"], ep, demo_order or [-1] * task.N_CUBES, extra_meta)
         print(f"episode {ep} (demo order {demo_order}): {'SUCCESS' if res['success'] else 'FAIL'} "
               f"({res['reason']}) | {res['sim_time']:.1f}s sim, {time.time() - t0:.0f}s wall | "
               f"policy latency mean {res['latency_mean'] * 1000:.0f} ms, max {res['latency_max'] * 1000:.0f} ms",

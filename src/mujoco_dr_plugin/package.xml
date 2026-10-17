@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mujoco_dr_plugin</name>
+  <version>0.1.0</version>
+  <description>
+    mujoco_ros2_control plugin for visual domain randomization: recolours MJCF materials in the
+    running simulation through a ~set_colors service (mujoco_dr_plugin/srv/SetColors).
+  </description>
+  <maintainer email="aa2334@g.rit.edu">aa2334</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>pluginlib</depend>
+  <depend>mujoco_vendor</depend>
+  <depend>mujoco_ros2_control_plugins</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,14 @@
+# Recolour MJCF materials in the running simulation (visual only; physics is unaffected).
+# Applied in the simulation thread before the reply, so frames rendered after the reply already
+# show the new colours.
+
+# Material names as in the MJCF (<material name="...">).
+string[] materials
+
+# RGBA per material, flattened: 4 values in [0, 1] per entry of `materials`.
+float32[] rgba
+
+---
+
+bool success
+string message

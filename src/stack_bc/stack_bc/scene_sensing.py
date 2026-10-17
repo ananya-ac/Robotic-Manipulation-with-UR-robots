@@ -72,6 +72,9 @@ class SceneManager:
 
     # ---- octomap -----------------------------------------------------------------------------
 
+    def refresh(self):
+        """Called by the oracle before every plan; the octomap updates itself (cf. scene_gt)."""
+
     def clear(self):
         _call(self._clear, Empty.Request(), "/clear_octomap")
         self.psm.clear_octomap()   # don't wait for move_group's empty-map diff to arrive

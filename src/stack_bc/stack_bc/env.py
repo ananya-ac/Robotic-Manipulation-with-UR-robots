@@ -39,6 +39,7 @@ class Snapshot:
     width: float               # measured fingertip gap (m)
     cube_pos: np.ndarray       # (N_CUBES, 3) world, task.CUBE_NAMES order
     cube_rot: np.ndarray       # (N_CUBES, 3, 3)
+    marker_pos: np.ndarray = None   # (3,) stack-location marker center (marker world only)
 
 
 def wait_for_topic(node, topic, msg_type, qos, timeout=15.0):
@@ -71,6 +72,7 @@ class StackEnv:
             raise RuntimeError("mujoco_model param not found in /robot_description")
         self.model = mujoco.MjModel.from_xml_path(match.group(1).strip())
         self.width_gauge = WidthGauge(self.model)
+        self.has_marker = has_marker(self.model)
 
         self._lock = threading.Lock()
         self._joints, self._joints_stamp = None, None
@@ -111,7 +113,8 @@ class StackEnv:
             stamp=stamp, q_arm=q_arm, q_gripper=q_grip, ee=self.kin.fk_world(q_arm),
             width=self.width_gauge(q_grip),
             cube_pos=np.stack([cubes[n][0] for n in task.CUBE_NAMES]),
-            cube_rot=np.stack([cubes[n][1] for n in task.CUBE_NAMES]))
+            cube_rot=np.stack([cubes[n][1] for n in task.CUBE_NAMES]),
+            marker_pos=cubes[task.MARKER_NAME][0] if self.has_marker else None)
 
     # ---- episodes ----------------------------------------------------------------------------
 
@@ -126,17 +129,39 @@ class StackEnv:
                 return xy, rng.uniform(-np.pi, np.pi, task.N_CUBES)
         raise RuntimeError("could not place cubes; spawn region too small for MIN_CUBE_SPACING")
 
-    def reset_world(self, cube_xy, cube_yaw, timeout=10.0):
+    @staticmethod
+    def sample_layout(rng, marker):
+        """(cube xy, cube yaw, marker xy or None). Without a marker this is exactly sample_cubes
+        (same rng draws, so existing seeds reproduce). With one, the marker is drawn after the
+        cubes, in the same region and MIN_CUBE_SPACING from every cube; a layout leaving no room
+        for it is redrawn whole."""
+        for _ in range(1000):
+            xy, yaw = StackEnv.sample_cubes(rng)
+            if not marker:
+                return xy, yaw, None
+            for _ in range(100):
+                m = np.array([rng.uniform(*task.SPAWN_X), rng.uniform(*task.SPAWN_Y)])
+                if np.all(np.linalg.norm(xy - m, axis=1) >= task.MIN_CUBE_SPACING):
+                    return xy, yaw, m
+        raise RuntimeError("could not place the marker; spawn region too small for MIN_CUBE_SPACING")
+
+    def reset_world(self, cube_xy, cube_yaw, marker_xy=None, timeout=10.0):
         """Atomic reset: robot to the "home" keyframe (arm + gripper open), cubes to the given
-        poses at rest on the table, all velocities zero. The caller must already have commanded
-        the arm controller to home, or JTC will drag the arm back to its last setpoint."""
+        poses at rest on the table, the marker (marker world) to marker_xy, all velocities zero.
+        The caller must already have commanded the arm controller to home, or JTC will drag the
+        arm back to its last setpoint."""
+        if self.has_marker and marker_xy is None:
+            raise ValueError("marker world: reset_world needs marker_xy")
         req = ResetWorld.Request()
         req.keyframe = "home"
-        for name, (x, y), yaw in zip(task.CUBE_NAMES, cube_xy, cube_yaw):
+        poses = [(name, x, y, task.CUBE_REST_Z, yaw) for name, (x, y), yaw in zip(task.CUBE_NAMES, cube_xy, cube_yaw)]
+        if self.has_marker:
+            poses.append((task.MARKER_NAME, marker_xy[0], marker_xy[1], task.MARKER_Z, 0.0))
+        for name, x, y, z, yaw in poses:
             fj = FreeJointState()
             fj.name = name
             fj.pose.pose.position.x, fj.pose.pose.position.y = float(x), float(y)
-            fj.pose.pose.position.z = float(task.CUBE_REST_Z)
+            fj.pose.pose.position.z = float(z)
             qx, qy, qz, qw = rot.matrix_to_quat(rot.rot_z(yaw))
             o = fj.pose.pose.orientation
             o.x, o.y, o.z, o.w = float(qx), float(qy), float(qz), float(qw)
@@ -150,14 +175,22 @@ class StackEnv:
             raise RuntimeError(f"reset_world failed: {future.result().message if future.done() else 'timeout'}")
 
 
-def stack_success(snap: Snapshot, order, xy_tol=0.01, z_tol=0.005, tilt_tol=np.deg2rad(10)):
-    """True when cube order[k] sits on order[k-1] (k >= 1) within tolerance, base on the table.
+def has_marker(model):
+    """Whether a compiled model is a marker world (tabletop_marker_mujoco.xml)."""
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, task.MARKER_NAME) >= 0
+
+
+def stack_success(snap: Snapshot, order, xy_tol=0.01, z_tol=0.005, tilt_tol=np.deg2rad(10), target_xy=None):
+    """True when cube order[k] sits on order[k-1] (k >= 1) within tolerance, base on the table
+    (and, given target_xy, within task.MARKER_XY_TOL of it).
 
     Tolerances: xy offset from the cube below, center height vs the ideal stacked height, and
     tilt of each cube's z axis from vertical. Stability over time is the caller's job (require
     this to hold for several consecutive ticks)."""
     base = order[0]
     if abs(snap.cube_pos[base, 2] - task.CUBE_REST_Z) > z_tol:
+        return False
+    if target_xy is not None and np.linalg.norm(snap.cube_pos[base, :2] - target_xy) > task.MARKER_XY_TOL:
         return False
     for k in range(len(order)):
         # A cube resting on any face counts as upright: tilt of whichever body axis is closest

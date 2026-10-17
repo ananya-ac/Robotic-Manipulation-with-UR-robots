@@ -43,10 +43,21 @@ def build_moveit_config(robot_description: str):
         os.unlink(tmp.name)
 
 
-def moveit_py_params(robot_description: str, mirror_scene: bool = False):
+def moveit_py_params(robot_description: str, mirror_scene: bool = False, offline: bool = False):
     """Parameter dict for MoveItPy. mirror_scene=True subscribes its planning scene monitor to
-    move_group's published scene (octomap + attached objects) instead of the unused default."""
+    move_group's published scene (octomap + attached objects) instead of the unused default.
+
+    offline=True: planning only, no robot or sim (planner_backend.OfflinePlanner). Wall time, and
+    no wait for an initial /joint_states (MoveItCpp otherwise fails with "Unable to configure
+    planning scene monitor"); the state monitor listens on an unused topic so a sim running
+    alongside can't overwrite the start states set per request."""
     config = build_moveit_config(robot_description).to_dict()
+    if offline:
+        config["use_sim_time"] = False
+        options = config["planning_scene_monitor_options"]
+        options["wait_for_initial_state_timeout"] = 0.0
+        options["joint_state_topic"] = "/stack_bc_offline/joint_states"
+        return config
     config["use_sim_time"] = True
     config["qos_overrides"] = {"/clock": {"subscription": {
         "reliability": "best_effort", "durability": "volatile", "history": "keep_last", "depth": 1}}}

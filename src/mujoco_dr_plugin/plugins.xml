@@ -1,0 +1,10 @@
+<library path="color_randomizer_plugin">
+  <class name="mujoco_dr_plugin/ColorRandomizerPlugin"
+         type="mujoco_dr_plugin::ColorRandomizerPlugin"
+         base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>
+      Recolours MJCF materials (mat_rgba) on request through the /color_randomizer/set_colors
+      service (mujoco_dr_plugin/srv/SetColors), for per-episode visual domain randomization.
+    </description>
+  </class>
+</library>

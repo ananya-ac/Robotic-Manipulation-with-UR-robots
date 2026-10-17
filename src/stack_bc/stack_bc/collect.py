@@ -4,6 +4,15 @@
       [--oracle obj_unknown]   # perception-driven oracle (see oracle_unknown.py); implies --scene sensors
       [--scene sensors]   # plan against a wrist-depth octomap; needs
                           # ros2 launch ur_gripper_sim_moveit_config ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85 sensors:=true
+      [--transit ompl]    # obj_known: OMPL transits against the ground-truth world (scene_gt.py)
+                          # instead of Pilz rise/over/down; no extra launch needed
+      [--randomize-colors]   # per-episode cube / table / marker colours (mujoco_dr_plugin)
+      [--wrist-images]       # record the live wrist camera (data/wrist_rgb); episodes start at
+                             # task.SCAN_Q; needs --transit ompl
+
+Marker world (the tower is built on a randomized stack-location marker) is chosen by the sim:
+  ros2 launch ur_bringup_sim robot_mujoco.launch.py world:=tabletop_marker_mujoco.xml
+collect detects it, samples the marker with the cubes, and has the oracle place the base on it.
 
 The oracle moves the robot through MoveIt (Pilz LIN trajectories, see motion.py) in the main
 thread; a recorder thread samples a fixed 10 Hz sim-time grid meanwhile, logging the observation
@@ -35,8 +44,11 @@ from stack_bc.oracle import OracleFailure, ScriptedStackOracle
 from stack_bc.oracle_unknown import PerceptionStackOracle
 from stack_bc.active_scan import ActiveScanner
 from stack_bc.perception_client import PerceptionClient
+from stack_bc.camera import IMAGE_TOPIC, WristCamera
+from stack_bc.randomize import ColorRandomizer, sample_colors
 from stack_bc.recorder import EpisodeBuffer, ReplayWriter
 from stack_bc.runtime import SimNode
+from stack_bc.scene_gt import GTScene
 from stack_bc.scene_sensing import SceneManager
 
 DT = 0.1
@@ -49,19 +61,41 @@ MAX_EPISODE_TIME = 120.0      # s sim time
 TICK_TOLERANCE = 0.02
 MAX_IRREGULAR_TICKS = 3
 SCAN_MOVE_TIME = 2.0          # s per unrecorded joint move to / from task.SCAN_Q (--scene sensors)
+# Image guard (--wrist-images): a tick's frame is stale if it is older than MAX_IMAGE_AGE (sim
+# time, tick stamp - frame stamp) or is the same frame the previous tick got. At the camera's
+# 20 Hz a fresh frame is <= ~0.05 s old plus publishing latency (~0.06 s measured). Episodes with
+# more than MAX_STALE_IMAGES stale ticks fail ("timing") like the tick guard above.
+MAX_IMAGE_AGE = 0.1
+MAX_STALE_IMAGES = 3
+CAMERA_SETTLE = 0.5           # s at the scan pose before recording, so frame 0 is a fresh overview
 
 
 class TickRecorder(threading.Thread):
     """Samples (observation, desired action) on a fixed 10 Hz sim-time grid until stopped."""
 
-    def __init__(self, sim, env, motion, gripper, buf, perceived=None):
-        """perceived: optional callable -> the oracle's perceived object poses (logged per tick)."""
+    def __init__(self, sim, env, motion, gripper, buf, perceived=None, camera=None):
+        """perceived: optional callable -> the oracle's perceived object poses (logged per tick).
+        camera: optional camera.WristCamera -> the newest wrist frame is logged per tick."""
         super().__init__(daemon=True)
         self.sim, self.env, self.motion, self.gripper, self.buf = sim, env, motion, gripper, buf
         self.perceived = perceived
+        self.camera = camera
         self._halt = threading.Event()  # not "_stop": that name is Thread-internal
         self.irregular, self.worst = 0, 0.0
+        self.stale_images, self.worst_image_age = 0, 0.0
+        self._last_image_stamp = None
         self.error = None
+
+    def _image(self, snap):
+        stamp, rgb = self.camera.latest()
+        if rgb is None:
+            raise RuntimeError("no wrist image received")
+        age = snap.stamp - stamp
+        self.worst_image_age = max(self.worst_image_age, age)
+        if age > MAX_IMAGE_AGE or stamp == self._last_image_stamp:
+            self.stale_images += 1
+        self._last_image_stamp = stamp
+        return stamp, rgb
 
     def run(self):
         try:
@@ -78,7 +112,8 @@ class TickRecorder(threading.Thread):
                 q_des = self.motion.desired_q(t_next + DT)
                 T_des = self.env.kin.fk_world(q_des) if q_des is not None else snap.ee
                 self.buf.record(snap, T_des, self.gripper.width_cmd,
-                                self.perceived() if self.perceived else None)
+                                self.perceived() if self.perceived else None,
+                                self._image(snap) if self.camera is not None else None)
                 t_next += DT
         except Exception as exc:  # surface recorder crashes to the episode loop
             self.error = exc
@@ -99,9 +134,13 @@ def scan_scene(sim, ex, scene):
     sim.sleep(SCAN_MOVE_TIME + 0.3)
 
 
-def home_and_reset(sim, env, motion, ex, rng, scene=None, scanner=None):
-    """Reset the world (unrecorded). scanner (oracle_obj_unknown): multi-view scan instead of the
-    plain octomap scan; returns its {name: Perceived}."""
+def home_and_reset(sim, env, motion, ex, rng, scene=None, scanner=None, colors=None, start_scan=False):
+    """Reset the world (unrecorded). Returns (perceived, marker_xy). scanner (oracle_obj_unknown):
+    multi-view scan instead of the plain octomap scan; perceived is its {name: Perceived}, else
+    None. marker_xy: the stack-location marker's sampled xy (marker world), else None.
+    colors: (randomize.ColorRandomizer, rgba) to apply after the reset (colour DR).
+    start_scan (--wrist-images): finish at task.SCAN_Q, where the wrist camera sees the whole
+    spawn region, so the recorded episode's first frame is that overview."""
     snap = env.snapshot()
     if np.max(np.abs(snap.q_arm - task.HOME_Q)) > 1e-3:
         ex.move_joints(task.HOME_Q, 2.5)  # unrecorded; see motion.py on why not MoveIt PTP
@@ -110,31 +149,50 @@ def home_and_reset(sim, env, motion, ex, rng, scene=None, scanner=None):
     else:
         ex.set_width(WIDTH_OPEN, force=True)
         sim.sleep(0.5)
-    xy, yaw = env.sample_cubes(rng)
-    env.reset_world(xy, yaw)
+    xy, yaw, marker_xy = env.sample_layout(rng, env.has_marker)
+    env.reset_world(xy, yaw, marker_xy)
+    if colors is not None:
+        colors[0].apply(colors[1])
     motion.forget()
     sim.sleep(0.5)  # contacts settle
     if scanner is not None:
-        return scanner.scan()
-    if scene is not None:
+        return scanner.scan(), marker_xy
+    if isinstance(scene, SceneManager):
         scan_scene(sim, ex, scene)
-    return None
+    elif scene is not None:
+        scene.clear()           # GTScene: nothing held; the world is rebuilt before every plan
+    if start_scan:
+        ex.move_joints(task.SCAN_Q, SCAN_MOVE_TIME)
+        sim.sleep(SCAN_MOVE_TIME + CAMERA_SETTLE)
+    return None, marker_xy
 
 
-def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception=None):
+def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception=None, transit="lin",
+                randomizer=None, camera=None):
+    """randomizer: a randomize.ColorRandomizer -> colour DR, with colours drawn from their own rng
+    stream ([seed, 1]), so layouts and stack orders are the same with or without DR.
+    camera: a camera.WristCamera -> wrist images recorded every tick; episodes start at SCAN_Q."""
     rng = np.random.default_rng(seed)
-    scan_error = None
+    rgba = sample_colors(np.random.default_rng([seed, 1])) if randomizer is not None else None
+    scan_error, marker_xy = None, None
     try:
-        perceived = home_and_reset(sim, env, motion, ex, rng, scene, scanner)
+        perceived, marker_xy = home_and_reset(sim, env, motion, ex, rng, scene, scanner,
+                                              (randomizer, rgba) if randomizer is not None else None,
+                                              start_scan=camera is not None)
     except (RuntimeError, PlanningFailure) as exc:
         if scanner is None:
             raise
         perceived, scan_error = {}, exc        # the episode fails below; the run continues
-    order = [int(i) for i in rng.permutation(task.N_CUBES)]   # after sample_cubes: same seeds -> same episodes
+    order = [int(i) for i in rng.permutation(task.N_CUBES)]   # after sample_layout: same seeds -> same episodes
+    extra_meta = {}
+    if marker_xy is not None:
+        extra_meta["episode_target"] = np.asarray(marker_xy, dtype=np.float64)
+    if rgba is not None:
+        extra_meta["episode_rgba"] = rgba
     buf = EpisodeBuffer(env.model)
     if scanner is None:
-        oracle = ScriptedStackOracle(sim, env, motion, ex, scene)
-        rec = TickRecorder(sim, env, motion, ex, buf)
+        oracle = ScriptedStackOracle(sim, env, motion, ex, scene, transit=transit)
+        rec = TickRecorder(sim, env, motion, ex, buf, camera=camera)
     else:
         oracle = PerceptionStackOracle(sim, env, motion, ex, scene, perception, perceived)
         rec = TickRecorder(sim, env, motion, ex, buf, perceived=oracle.perceived_state)
@@ -145,11 +203,14 @@ def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception
     try:
         if scan_error is not None:
             raise OracleFailure(f"scan: {scan_error}")
-        oracle.run(order)
+        if marker_xy is not None:
+            oracle.run(order, target_xy=marker_xy)
+        else:
+            oracle.run(order)
         hold, t_end = 0, sim.now() + POST_TASK_TIME
         while sim.now() < t_end:
             sim.sleep(DT)
-            hold = hold + 1 if stack_success(env.snapshot(), order) else 0
+            hold = hold + 1 if stack_success(env.snapshot(), order, target_xy=marker_xy) else 0
             if hold >= SUCCESS_HOLD_TICKS:
                 success = True
                 break
@@ -166,7 +227,11 @@ def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception
     elif rec.irregular > MAX_IRREGULAR_TICKS:
         success, reason = False, (f"timing: {rec.irregular} ticks off-slot by > {TICK_TOLERANCE * 1000:.0f} ms "
                                   f"(worst {rec.worst * 1000:.0f} ms)")
-    return buf, success, reason, order, rec
+    elif rec.stale_images > MAX_STALE_IMAGES:
+        success, reason = False, (f"timing: {rec.stale_images} stale wrist frames (older than "
+                                  f"{MAX_IMAGE_AGE * 1000:.0f} ms or repeated; worst age "
+                                  f"{rec.worst_image_age * 1000:.0f} ms) - camera rate too low?")
+    return buf, success, reason, order, rec, extra_meta
 
 
 def main():
@@ -183,25 +248,59 @@ def main():
     parser.add_argument("--scene", choices=("none", "sensors"), default="none",
                         help="MoveIt collision world: none (self-collision only) or sensors (wrist-depth "
                         "octomap; needs `ur_moveit.launch.py ur_type:=ur5e gripper:=robotiq_2f85 sensors:=true`)")
+    parser.add_argument("--transit", choices=("lin", "ompl"), default="lin",
+                        help="obj_known transits: lin (Pilz rise / over / down) or ompl (one OMPL move "
+                        "against the ground-truth table + cube boxes; incompatible with --scene sensors)")
+    parser.add_argument("--randomize-colors", action="store_true",
+                        help="colour domain randomization: per-episode cube / table / marker colours via "
+                        "mujoco_dr_plugin (/color_randomizer/set_colors), stored in meta/episode_rgba")
+    parser.add_argument("--wrist-images", action="store_true",
+                        help="record the live wrist camera (data/wrist_rgb, 240x320 RGB) every tick; episodes "
+                        "start at the scan overview pose task.SCAN_Q (needs --transit ompl)")
     args = parser.parse_args()
+    if args.wrist_images and (args.oracle != "obj_known" or args.transit != "ompl"):
+        # From SCAN_Q (tip z 0.575) the LIN transit's horizontal leg would run at that height,
+        # above the IK-feasible ceiling (~0.55) over most of the table; OMPL plans around it.
+        parser.error("--wrist-images needs --oracle obj_known --transit ompl")
     max_attempts = args.max_attempts or 2 * args.episodes
 
     out = os.path.expanduser(args.out)
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     if args.oracle == "obj_unknown":
         args.scene = "sensors"
-    writer = ReplayWriter(out, oracle=args.oracle)
+        if args.transit != "lin":
+            parser.error("--transit applies to --oracle obj_known only (obj_unknown always uses OMPL)")
+    elif args.transit == "ompl" and args.scene == "sensors":
+        parser.error("--transit ompl plans against the ground-truth world; drop --scene sensors")
+    sim = SimNode("stack_bc_collect")
+    env = StackEnv(sim.node, sim.clock)
+    if env.has_marker and (args.oracle != "obj_known" or args.scene == "sensors"):
+        parser.error("the marker world (tabletop_marker_mujoco.xml) supports --oracle obj_known without "
+                     "--scene sensors only")
+    writer = ReplayWriter(out, oracle=args.oracle, transit=args.transit if args.oracle == "obj_known" else None,
+                          marker="on" if env.has_marker else "off",
+                          dr="colors" if args.randomize_colors else "none",
+                          images="wrist_rgb" if args.wrist_images else "none",
+                          start="scan" if args.wrist_images else "home")
     writer.truncate_partial()
     seed = int(writer.root.attrs.get("next_seed", args.seed))
 
-    sim = SimNode("stack_bc_collect")
-    env = StackEnv(sim.node, sim.clock)
     ex = EEExecutor(sim.node, env.kin, dt=DT)
     ex.wait_for_servers()
     if not sim.wait_for(env.ready, 10.0):
         raise RuntimeError("no /joint_states or cube poses")
+    randomizer = ColorRandomizer(sim.node) if args.randomize_colors else None
+    camera = None
+    if args.wrist_images:
+        camera = WristCamera(sim.node)
+        if not sim.wait_for(camera.ready, 10.0):
+            raise RuntimeError(f"no wrist images on {IMAGE_TOPIC}")
     motion = MoveItMotion(env.urdf, sim.now, mirror_scene=args.scene == "sensors")
-    scene = SceneManager(sim.node, env.urdf, motion.scene_monitor) if args.scene == "sensors" else None
+    scene = None
+    if args.scene == "sensors":
+        scene = SceneManager(sim.node, env.urdf, motion.scene_monitor)
+    elif args.transit == "ompl":
+        scene = GTScene(env, motion.scene_monitor, env.urdf)
     perception = scanner = None
     if args.oracle == "obj_unknown":
         perception = PerceptionClient(sim.node)
@@ -210,11 +309,15 @@ def main():
     added, attempts = 0, 0
     while added < args.episodes and attempts < max_attempts:
         t0 = time.time()
-        buf, success, reason, order, rec = run_episode(sim, env, motion, ex, seed, scene, scanner, perception)
+        buf, success, reason, order, rec, extra_meta = run_episode(
+            sim, env, motion, ex, seed, scene, scanner, perception, transit=args.transit, randomizer=randomizer,
+            camera=camera)
         attempts += 1
         timing = f" [{rec.irregular} off-slot ticks, worst {rec.worst * 1000:.0f} ms]" if rec.irregular else ""
+        if camera is not None:
+            timing += f" [wrist frames: {rec.stale_images} stale, worst age {rec.worst_image_age * 1000:.0f} ms]"
         if success:
-            writer.append_episode(buf.arrays(), True, seed, order)
+            writer.append_episode(buf.arrays(), True, seed, order, extra_meta)
             added += 1
         writer.root.attrs["next_seed"] = seed + 1  # after the episode is committed (or dropped)
         print(f"seed {seed} order {order}: {'OK  ' if success else 'FAIL'} {len(buf)} steps "
@@ -238,6 +341,8 @@ if __name__ == "__main__":
     keepalive = None
     try:
         keepalive = main()  # noqa: F841 - held until os._exit, see main()
+    except SystemExit as exc:   # argparse errors / --help: already reported
+        code = exc.code if isinstance(exc.code, int) else 1
     except BaseException:
         import traceback
         traceback.print_exc()

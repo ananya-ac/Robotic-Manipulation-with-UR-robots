@@ -27,6 +27,15 @@ def state_vector(snap):
     return np.concatenate(parts).astype(np.float32)
 
 
+TARGET_DIM = 3   # stack-location marker center (marker world): recorded as data/target_pose
+
+
+def target_vector(snap):
+    """(3,) marker center in world. A circle has no orientation, so position is the whole pose;
+    the low-dim adapter appends it to state_vector for marker-world state policies."""
+    return np.asarray(snap.marker_pos, dtype=np.float32)
+
+
 def action_vector(T_world, width):
     return np.concatenate([T_world[:3, 3], rot.matrix_to_rot6d(T_world[:3, :3]), [width]]).astype(np.float32)
 
