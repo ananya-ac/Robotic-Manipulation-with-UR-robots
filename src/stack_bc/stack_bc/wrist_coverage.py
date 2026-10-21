@@ -22,7 +22,7 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from stack_bc import task  # noqa: E402
-from stack_bc.camera import IMAGE_SHAPE  # noqa: E402
+from stack_bc.imageproc import IMAGE_SHAPE  # noqa: E402
 from stack_bc.scene import DEFAULT_OUT  # noqa: E402
 
 HELD_MAX_DIST = 0.03      # tip-to-cube-centre distance for "in the hand" (as scene_gt)

@@ -196,6 +196,7 @@ Main `stack_bc.collect` modes (all flags in `python3 -m stack_bc.collect -h`):
 | OMPL transits (DAgger plan) | either | `--transit ompl` |
 | Marker task + colour DR | marker | `--transit ompl --randomize-colors` |
 | + wrist images (episodes start at the overview pose `task.SCAN_Q`) | marker | `--transit ompl --randomize-colors --wrist-images` |
+| + wrist depth (same render; or add later: `python3 -m stack_bc.backfill_depth`) | marker | `--transit ompl --randomize-colors --wrist-images --wrist-depth` |
 | Perception oracle | default + `ur_moveit.launch.py sensors:=true` + `perception.launch.py` | `--oracle obj_unknown` |
 
 Details: `notes/bc_data_pipeline_and_training.md`, `notes/domain_randomization.md`,

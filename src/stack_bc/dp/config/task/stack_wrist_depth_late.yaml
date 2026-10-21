@@ -1,0 +1,54 @@
+# Wrist RGB + depth, variant B: LATE FUSION. RGB (wrist) and depth (wrist_depth) are separate image
+# keys with their own ResNet-18 (3-channel and 1-channel conv1); their pooled features are
+# concatenated (with proprio) by MultiImageObsEncoder. Note: it random-crops each key independently
+# at train time (aligned centre crops at inference). See stack_wrist_rgbd.yaml for the ablation.
+name: stack_wrist_depth_late
+
+shape_meta: &shape_meta
+  obs:
+    wrist:
+      shape: [3, 240, 320]
+      type: rgb
+    wrist_depth:
+      shape: [1, 240, 320]   # stack_dp.depth.depth_unit
+      type: rgb
+    proprio:
+      shape: [10]
+      type: low_dim
+  action:
+    shape: [10]
+
+obs_encoder:
+  _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+  _convert_: partial         # pass rgb_model to the encoder as a plain dict of modules
+  shape_meta: *shape_meta
+  rgb_model:
+    wrist:
+      _target_: stack_dp.vision.get_resnet_in_chans
+      name: resnet18
+      in_chans: 3
+    wrist_depth:
+      _target_: stack_dp.vision.get_resnet_in_chans
+      name: resnet18
+      in_chans: 1
+  resize_shape: [240, 320]
+  crop_shape: [216, 288]
+  random_crop: True
+  use_group_norm: True
+  share_rgb_model: False
+  imagenet_norm: False
+
+env_runner:
+  _target_: stack_dp.null_image_runner.NullImageRunner
+
+dataset:
+  _target_: stack_dp.stack_image_dataset.StackImageDataset
+  shape_meta: *shape_meta
+  zarr_path: ${oc.env:HOME}/data/stack_bc/wrist_depth.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null

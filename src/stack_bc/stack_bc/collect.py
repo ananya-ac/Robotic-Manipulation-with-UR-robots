@@ -9,6 +9,7 @@
       [--randomize-colors]   # per-episode cube / table / marker colours (mujoco_dr_plugin)
       [--wrist-images]       # record the live wrist camera (data/wrist_rgb); episodes start at
                              # task.SCAN_Q; needs --transit ompl
+      [--wrist-depth]        # + the wrist depth from the same render (data/wrist_depth)
 
 Marker world (the tower is built on a randomized stack-location marker) is chosen by the sim:
   ros2 launch ur_bringup_sim robot_mujoco.launch.py world:=tabletop_marker_mujoco.xml
@@ -44,7 +45,7 @@ from stack_bc.oracle import OracleFailure, ScriptedStackOracle
 from stack_bc.oracle_unknown import PerceptionStackOracle
 from stack_bc.active_scan import ActiveScanner
 from stack_bc.perception_client import PerceptionClient
-from stack_bc.camera import CAMERA_SETTLE, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
+from stack_bc.camera import CAMERA_SETTLE, DEPTH_TOPIC, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
 from stack_bc.randomize import ColorRandomizer, sample_colors
 from stack_bc.recorder import EpisodeBuffer, ReplayWriter
 from stack_bc.runtime import SimNode
@@ -83,15 +84,20 @@ class TickRecorder(threading.Thread):
         self.error = None
 
     def _image(self, snap):
-        stamp, rgb = self.camera.latest()
+        """(stamp, rgb) or, with a depth camera, (stamp, rgb, depth_mm) from one render. A colour /
+        depth pair without a shared stamp counts as stale, like an old or repeated frame."""
+        if self.camera.depth:
+            stamp, rgb, depth, matched = self.camera.latest_rgbd()
+        else:
+            (stamp, rgb), depth, matched = self.camera.latest(), None, True
         if rgb is None:
             raise RuntimeError("no wrist image received")
         age = snap.stamp - stamp
         self.worst_image_age = max(self.worst_image_age, age)
-        if age > MAX_IMAGE_AGE or stamp == self._last_image_stamp:
+        if age > MAX_IMAGE_AGE or stamp == self._last_image_stamp or not matched:
             self.stale_images += 1
         self._last_image_stamp = stamp
-        return stamp, rgb
+        return (stamp, rgb) if depth is None else (stamp, rgb, depth)
 
     def run(self):
         try:
@@ -253,7 +259,12 @@ def main():
     parser.add_argument("--wrist-images", action="store_true",
                         help="record the live wrist camera (data/wrist_rgb, 240x320 RGB) every tick; episodes "
                         "start at the scan overview pose task.SCAN_Q (needs --transit ompl)")
+    parser.add_argument("--wrist-depth", action="store_true",
+                        help="also record the wrist depth from the same render (data/wrist_depth, 240x320 uint16 "
+                        "mm; needs --wrist-images)")
     args = parser.parse_args()
+    if args.wrist_depth and not args.wrist_images:
+        parser.error("--wrist-depth needs --wrist-images")
     if args.wrist_images and (args.oracle != "obj_known" or args.transit != "ompl"):
         # From SCAN_Q (tip z 0.575) the LIN transit's horizontal leg would run at that height,
         # above the IK-feasible ceiling (~0.55) over most of the table; OMPL plans around it.
@@ -277,7 +288,8 @@ def main():
                           marker="on" if env.has_marker else "off",
                           dr="colors" if args.randomize_colors else "none",
                           images="wrist_rgb" if args.wrist_images else "none",
-                          start="scan" if args.wrist_images else "home")
+                          start="scan" if args.wrist_images else "home",
+                          depth="wrist_depth" if args.wrist_depth else "none")
     writer.truncate_partial()
     seed = int(writer.root.attrs.get("next_seed", args.seed))
 
@@ -288,9 +300,9 @@ def main():
     randomizer = ColorRandomizer(sim.node) if args.randomize_colors else None
     camera = None
     if args.wrist_images:
-        camera = WristCamera(sim.node)
+        camera = WristCamera(sim.node, depth=args.wrist_depth)
         if not sim.wait_for(camera.ready, 10.0):
-            raise RuntimeError(f"no wrist images on {IMAGE_TOPIC}")
+            raise RuntimeError(f"no wrist images on {IMAGE_TOPIC}" + (f" / {DEPTH_TOPIC}" if args.wrist_depth else ""))
     motion = MoveItMotion(env.urdf, sim.now, mirror_scene=args.scene == "sensors")
     scene = None
     if args.scene == "sensors":

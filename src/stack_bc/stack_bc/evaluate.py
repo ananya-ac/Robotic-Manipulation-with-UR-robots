@@ -36,7 +36,7 @@ import zmq
 
 from stack_bc import rotations as rot
 from stack_bc import spaces, task
-from stack_bc.camera import CAMERA_SETTLE, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
+from stack_bc.camera import CAMERA_SETTLE, DEPTH_TOPIC, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
 from stack_bc.env import StackEnv, has_marker, stack_success
 from stack_bc.randomize import ColorRandomizer
 from stack_bc.executor import EEExecutor, IKFailure
@@ -114,57 +114,83 @@ def is_image_policy(info):
     return bool(info.get("obs_keys"))
 
 
-class ObsHistory:
-    """The last n_obs_steps observations in the policy's input format.
+def policy_inputs(info):
+    """Raw inputs an image policy wants (server info "inputs"; older servers: its obs keys)."""
+    return set(info.get("inputs") or info.get("obs_keys") or ())
 
-    Low-dim policies: (To, obs_dim) state_vector rows. Image policies: {"wrist": (To, H, W, 3)
-    uint8, "proprio": (To, 10), ["wrist_context": (To, H, W, 3)]}. Like the training windows, the
-    history starts filled with the first observation (pad_before repeats it); the context frame is
-    the first tick's wrist frame, i.e. the overview at task.SCAN_Q."""
+
+def needs_depth(info):
+    return "wrist_depth" in policy_inputs(info)
+
+
+class ObsHistory:
+    """The last n_obs_steps observations in the policy server's input format.
+
+    Low-dim policies: (To, obs_dim) state_vector rows. Image policies: the server's raw "inputs":
+    {"wrist": (To, H, W, 3) uint8, "proprio": (To, 10), ["wrist_depth": (To, H, W) uint16 mm],
+    ["wrist_context": (To, H, W, 3)]}; the server builds the checkpoint's keys from them (e.g.
+    wrist_rgbd). Like the training windows, the history starts filled with the first observation
+    (pad_before repeats it); the context frame is the first tick's wrist frame, i.e. the overview
+    at task.SCAN_Q. Colour and depth come from the same render (camera.latest_rgbd); a pair
+    without a shared stamp counts as stale."""
 
     def __init__(self, info, camera=None):
         self.To = info["n_obs_steps"]
-        self.keys = info.get("obs_keys") or {}
-        if self.keys and camera is None:
+        self.inputs = policy_inputs(info)
+        if self.inputs and camera is None:
             raise ValueError("image policy needs a camera")
+        self.depth = "wrist_depth" in self.inputs
+        if self.depth and not camera.depth:
+            raise ValueError("depth policy needs WristCamera(depth=True)")
         self.camera = camera
         self.stale, self._last_stamp = 0, None
 
     def _frame(self, snap):
-        stamp, rgb = self.camera.latest()
+        if self.depth:
+            stamp, rgb, depth, matched = self.camera.latest_rgbd()
+        else:
+            (stamp, rgb), depth, matched = self.camera.latest(), None, True
         if rgb is None:
             raise RuntimeError("no wrist image")
-        if snap.stamp - stamp > MAX_IMAGE_AGE or stamp == self._last_stamp:
+        if snap.stamp - stamp > MAX_IMAGE_AGE or stamp == self._last_stamp or not matched:
             self.stale += 1
         self._last_stamp = stamp
-        return stamp, rgb
+        return (stamp, rgb) if depth is None else (stamp, rgb, depth)
 
     def start(self, snap):
         """First tick: fill the history with this observation. Returns the frame (or None)."""
-        if not self.keys:
+        if not self.inputs:
             self.state = deque([spaces.state_vector(snap)] * self.To, maxlen=self.To)
             return None
         frame = self._frame(snap)
         self.context = frame[1]
         self.wrist = deque([frame[1]] * self.To, maxlen=self.To)
+        if self.depth:
+            self.wrist_depth = deque([frame[2]] * self.To, maxlen=self.To)
         self.proprio = deque([spaces.state_vector(snap)[:10]] * self.To, maxlen=self.To)
         return frame
 
     def push(self, snap):
         """Later ticks. Returns the frame (or None)."""
-        if not self.keys:
+        if not self.inputs:
             self.state.append(spaces.state_vector(snap))
             return None
         frame = self._frame(snap)
         self.wrist.append(frame[1])
+        if self.depth:
+            self.wrist_depth.append(frame[2])
         self.proprio.append(spaces.state_vector(snap)[:10])
         return frame
 
     def obs(self):
-        if not self.keys:
+        if not self.inputs:
             return np.stack(self.state).astype(np.float32)
-        out = {"wrist": np.stack(self.wrist), "proprio": np.stack(self.proprio).astype(np.float32)}
-        if "wrist_context" in self.keys:
+        out = {"proprio": np.stack(self.proprio).astype(np.float32)}
+        if "wrist" in self.inputs:
+            out["wrist"] = np.stack(self.wrist)
+        if self.depth:
+            out["wrist_depth"] = np.stack(self.wrist_depth)
+        if "wrist_context" in self.inputs:
             out["wrist_context"] = np.repeat(self.context[None], self.To, axis=0)
         return out
 
@@ -245,13 +271,15 @@ def main():
     print(f"policy: {info}", flush=True)
     camera = None
     if is_image_policy(info):
-        camera = WristCamera(sim.node)
+        camera = WristCamera(sim.node, depth=needs_depth(info))
         if not sim.wait_for(camera.ready, 10.0):
-            raise RuntimeError(f"image policy but no wrist images on {IMAGE_TOPIC}")
+            raise RuntimeError(f"image policy but no wrist images on {IMAGE_TOPIC}"
+                               + (f" / {DEPTH_TOPIC}" if needs_depth(info) else ""))
     writer = None
     if args.record:
         writer = ReplayWriter(os.path.expanduser(args.record),
-                              images="wrist_rgb" if camera else "none", start="scan" if camera else "home")
+                              images="wrist_rgb" if camera else "none", start="scan" if camera else "home",
+                              depth="wrist_depth" if camera is not None and camera.depth else "none")
 
     results = []
     randomizer = None

@@ -1,0 +1,49 @@
+# Wrist RGB + depth, variant C: CROSS-ATTENTION FUSION (stack_dp.vision.RGBDCrossAttnEncoder).
+# Shared random crop, separate RGB / depth ResNet-18 trunks -> 2 x 63 spatial tokens (+ 2D position
+# and modality embeddings) -> 16 learned latents x 2 blocks of [cross-attention, self-attention,
+# MLP] -> 512-D, + proprio. See stack_wrist_rgbd.yaml for the ablation.
+name: stack_wrist_depth_xattn
+
+shape_meta: &shape_meta
+  obs:
+    wrist:
+      shape: [3, 240, 320]
+      type: rgb
+    wrist_depth:
+      shape: [1, 240, 320]   # stack_dp.depth.depth_unit
+      type: rgb
+    proprio:
+      shape: [10]
+      type: low_dim
+  action:
+    shape: [10]
+
+obs_encoder:
+  _target_: stack_dp.vision.RGBDCrossAttnEncoder
+  shape_meta: *shape_meta
+  rgb_key: wrist
+  depth_key: wrist_depth
+  backbone: resnet18
+  crop_shape: [216, 288]
+  random_crop: True
+  d_model: 256
+  n_latents: 16
+  n_layers: 2
+  n_heads: 8
+  out_dim: 512
+  dropout: 0.0
+
+env_runner:
+  _target_: stack_dp.null_image_runner.NullImageRunner
+
+dataset:
+  _target_: stack_dp.stack_image_dataset.StackImageDataset
+  shape_meta: *shape_meta
+  zarr_path: ${oc.env:HOME}/data/stack_bc/wrist_depth.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null
