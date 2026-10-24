@@ -10,10 +10,18 @@
       [--wrist-images]       # record the live wrist camera (data/wrist_rgb); episodes start at
                              # task.SCAN_Q; needs --transit ompl
       [--wrist-depth]        # + the wrist depth from the same render (data/wrist_depth)
+      [--front-images]       # + the station's fixed front camera (data/front_rgb); needs the
+                             #   DP-paper station world (world:=dp_station_mujoco.xml) and --wrist-images
 
 Marker world (the tower is built on a randomized stack-location marker) is chosen by the sim:
   ros2 launch ur_bringup_sim robot_mujoco.launch.py world:=tabletop_marker_mujoco.xml
 collect detects it, samples the marker with the cubes, and has the oracle place the base on it.
+DP-paper station world (marker task + the Diffusion Policy paper's UR5 camera rig; the wrist camera
+gets the D415 fovy 42.5 automatically):
+  ros2 launch ur_bringup_sim robot_mujoco.launch.py world:=dp_station_mujoco.xml
+  python3 -m stack_bc.collect --out ~/data/stack_bc/station.zarr --transit ompl --wrist-images --front-images
+Its offline-only cameras (front_b, topdown, side) are rendered from the logged qpos afterwards
+(stack_bc.render_views).
 
 The oracle moves the robot through MoveIt (Pilz LIN trajectories, see motion.py) in the main
 thread; a recorder thread samples a fixed 10 Hz sim-time grid meanwhile, logging the observation
@@ -45,7 +53,7 @@ from stack_bc.oracle import OracleFailure, ScriptedStackOracle
 from stack_bc.oracle_unknown import PerceptionStackOracle
 from stack_bc.active_scan import ActiveScanner
 from stack_bc.perception_client import PerceptionClient
-from stack_bc.camera import CAMERA_SETTLE, DEPTH_TOPIC, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
+from stack_bc.camera import CAMERA_SETTLE, DEPTH_TOPIC, FRONT_IMAGE_TOPIC, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
 from stack_bc.randomize import ColorRandomizer, sample_colors
 from stack_bc.recorder import EpisodeBuffer, ReplayWriter
 from stack_bc.runtime import SimNode
@@ -70,9 +78,13 @@ MAX_STALE_IMAGES = 3
 class TickRecorder(threading.Thread):
     """Samples (observation, desired action) on a fixed 10 Hz sim-time grid until stopped."""
 
-    def __init__(self, sim, env, motion, gripper, buf, perceived=None, camera=None):
+    def __init__(self, sim, env, motion, gripper, buf, perceived=None, camera=None, front=None):
         """perceived: optional callable -> the oracle's perceived object poses (logged per tick).
-        camera: optional camera.WristCamera -> the newest wrist frame is logged per tick."""
+        camera: optional camera.WristCamera -> the newest wrist frame is logged per tick.
+        front: optional camera.WristCamera on FRONT_IMAGE_TOPIC -> the newest front frame too (its
+        stale frames count towards the same MAX_STALE_IMAGES guard)."""
+        self.front = front
+        self._last_front_stamp = None
         super().__init__(daemon=True)
         self.sim, self.env, self.motion, self.gripper, self.buf = sim, env, motion, gripper, buf
         self.perceived = perceived
@@ -99,6 +111,17 @@ class TickRecorder(threading.Thread):
         self._last_image_stamp = stamp
         return (stamp, rgb) if depth is None else (stamp, rgb, depth)
 
+    def _front(self, snap):
+        stamp, rgb = self.front.latest()
+        if rgb is None:
+            raise RuntimeError("no front image received")
+        age = snap.stamp - stamp
+        self.worst_image_age = max(self.worst_image_age, age)
+        if age > MAX_IMAGE_AGE or stamp == self._last_front_stamp:
+            self.stale_images += 1
+        self._last_front_stamp = stamp
+        return stamp, rgb
+
     def run(self):
         try:
             t_next = self.sim.now()
@@ -115,7 +138,8 @@ class TickRecorder(threading.Thread):
                 T_des = self.env.kin.fk_world(q_des) if q_des is not None else snap.ee
                 self.buf.record(snap, T_des, self.gripper.width_cmd,
                                 self.perceived() if self.perceived else None,
-                                self._image(snap) if self.camera is not None else None)
+                                self._image(snap) if self.camera is not None else None,
+                                self._front(snap) if self.front is not None else None)
                 t_next += DT
         except Exception as exc:  # surface recorder crashes to the episode loop
             self.error = exc
@@ -170,10 +194,11 @@ def home_and_reset(sim, env, motion, ex, rng, scene=None, scanner=None, colors=N
 
 
 def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception=None, transit="lin",
-                randomizer=None, camera=None):
+                randomizer=None, camera=None, front=None):
     """randomizer: a randomize.ColorRandomizer -> colour DR, with colours drawn from their own rng
     stream ([seed, 1]), so layouts and stack orders are the same with or without DR.
-    camera: a camera.WristCamera -> wrist images recorded every tick; episodes start at SCAN_Q."""
+    camera: a camera.WristCamera -> wrist images recorded every tick; episodes start at SCAN_Q.
+    front: a camera.WristCamera on the station's front camera -> also recorded every tick."""
     rng = np.random.default_rng(seed)
     rgba = sample_colors(np.random.default_rng([seed, 1])) if randomizer is not None else None
     scan_error, marker_xy = None, None
@@ -194,7 +219,7 @@ def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception
     buf = EpisodeBuffer(env.model)
     if scanner is None:
         oracle = ScriptedStackOracle(sim, env, motion, ex, scene, transit=transit)
-        rec = TickRecorder(sim, env, motion, ex, buf, camera=camera)
+        rec = TickRecorder(sim, env, motion, ex, buf, camera=camera, front=front)
     else:
         oracle = PerceptionStackOracle(sim, env, motion, ex, scene, perception, perceived)
         rec = TickRecorder(sim, env, motion, ex, buf, perceived=oracle.perceived_state)
@@ -230,7 +255,7 @@ def run_episode(sim, env, motion, ex, seed, scene=None, scanner=None, perception
         success, reason = False, (f"timing: {rec.irregular} ticks off-slot by > {TICK_TOLERANCE * 1000:.0f} ms "
                                   f"(worst {rec.worst * 1000:.0f} ms)")
     elif rec.stale_images > MAX_STALE_IMAGES:
-        success, reason = False, (f"timing: {rec.stale_images} stale wrist frames (older than "
+        success, reason = False, (f"timing: {rec.stale_images} stale camera frames (older than "
                                   f"{MAX_IMAGE_AGE * 1000:.0f} ms or repeated; worst age "
                                   f"{rec.worst_image_age * 1000:.0f} ms) - camera rate too low?")
     return buf, success, reason, order, rec, extra_meta
@@ -262,9 +287,14 @@ def main():
     parser.add_argument("--wrist-depth", action="store_true",
                         help="also record the wrist depth from the same render (data/wrist_depth, 240x320 uint16 "
                         "mm; needs --wrist-images)")
+    parser.add_argument("--front-images", action="store_true",
+                        help="also record the DP-paper station's fixed front camera (data/front_rgb, 240x320 RGB; "
+                        "needs --wrist-images and the station world, world:=dp_station_mujoco.xml)")
     args = parser.parse_args()
     if args.wrist_depth and not args.wrist_images:
         parser.error("--wrist-depth needs --wrist-images")
+    if args.front_images and not args.wrist_images:
+        parser.error("--front-images needs --wrist-images")
     if args.wrist_images and (args.oracle != "obj_known" or args.transit != "ompl"):
         # From SCAN_Q (tip z 0.575) the LIN transit's horizontal leg would run at that height,
         # above the IK-feasible ceiling (~0.55) over most of the table; OMPL plans around it.
@@ -284,12 +314,16 @@ def main():
     if env.has_marker and (args.oracle != "obj_known" or args.scene == "sensors"):
         parser.error("the marker world (tabletop_marker_mujoco.xml) supports --oracle obj_known without "
                      "--scene sensors only")
+    if args.front_images and not env.has_station:
+        parser.error("--front-images needs the DP-paper station world (launch with world:=dp_station_mujoco.xml)")
     writer = ReplayWriter(out, oracle=args.oracle, transit=args.transit if args.oracle == "obj_known" else None,
                           marker="on" if env.has_marker else "off",
                           dr="colors" if args.randomize_colors else "none",
-                          images="wrist_rgb" if args.wrist_images else "none",
+                          images=("wrist_rgb,front_rgb" if args.front_images else "wrist_rgb") if args.wrist_images
+                          else "none",
                           start="scan" if args.wrist_images else "home",
-                          depth="wrist_depth" if args.wrist_depth else "none")
+                          depth="wrist_depth" if args.wrist_depth else "none",
+                          station="dp" if env.has_station else "off")
     writer.truncate_partial()
     seed = int(writer.root.attrs.get("next_seed", args.seed))
 
@@ -303,6 +337,11 @@ def main():
         camera = WristCamera(sim.node, depth=args.wrist_depth)
         if not sim.wait_for(camera.ready, 10.0):
             raise RuntimeError(f"no wrist images on {IMAGE_TOPIC}" + (f" / {DEPTH_TOPIC}" if args.wrist_depth else ""))
+    front = None
+    if args.front_images:
+        front = WristCamera(sim.node, FRONT_IMAGE_TOPIC, name="front")
+        if not sim.wait_for(front.ready, 10.0):
+            raise RuntimeError(f"no front images on {FRONT_IMAGE_TOPIC}")
     motion = MoveItMotion(env.urdf, sim.now, mirror_scene=args.scene == "sensors")
     scene = None
     if args.scene == "sensors":
@@ -319,11 +358,12 @@ def main():
         t0 = time.time()
         buf, success, reason, order, rec, extra_meta = run_episode(
             sim, env, motion, ex, seed, scene, scanner, perception, transit=args.transit, randomizer=randomizer,
-            camera=camera)
+            camera=camera, front=front)
         attempts += 1
         timing = f" [{rec.irregular} off-slot ticks, worst {rec.worst * 1000:.0f} ms]" if rec.irregular else ""
         if camera is not None:
-            timing += f" [wrist frames: {rec.stale_images} stale, worst age {rec.worst_image_age * 1000:.0f} ms]"
+            timing += (f" [{'wrist+front' if front is not None else 'wrist'} frames: {rec.stale_images} stale, "
+                       f"worst age {rec.worst_image_age * 1000:.0f} ms]")
         if success:
             writer.append_episode(buf.arrays(), True, seed, order, extra_meta)
             added += 1

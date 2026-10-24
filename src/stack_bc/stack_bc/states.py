@@ -25,6 +25,10 @@ from stack_bc.scene import DEFAULT_OUT, build_scene
 
 MARKER_SCENE_DIR = DEFAULT_OUT + "_marker"
 MARKER_WORLD = "tabletop_marker_mujoco.xml"
+# DP-paper station: the marker world's physics + the paper's camera rig (worlds/dp_station_mujoco.xml).
+# Same qpos layout as the marker world; the wrist camera has fovy 42.5 there (scene.camera_fovy_for).
+STATION_SCENE_DIR = DEFAULT_OUT + "_dp_station"
+STATION_WORLD = "dp_station_mujoco.xml"
 
 
 def offline_robot(scene_dir=DEFAULT_OUT, world="tabletop_mujoco.xml"):
@@ -36,6 +40,21 @@ def offline_robot(scene_dir=DEFAULT_OUT, world="tabletop_mujoco.xml"):
     with open(os.path.join(scene_dir, "robot_only.urdf")) as f:
         urdf = f.read()
     return mujoco.MjModel.from_xml_path(scene_xml), urdf
+
+
+def dataset_model(root):
+    """(MjModel, URDF) matching a stack_bc zarr's world, from its tags: the DP-paper station world
+    (attrs station="dp"; different wrist camera fovy + the extra cameras), the marker world
+    (marker="on"), else the plain tabletop. Checks the qpos width against the model."""
+    if root.attrs.get("station", "off") == "dp":
+        model, urdf = offline_robot(STATION_SCENE_DIR, STATION_WORLD)
+    elif root.attrs.get("marker", "off") == "on":
+        model, urdf = offline_robot(MARKER_SCENE_DIR, MARKER_WORLD)
+    else:
+        model, urdf = offline_robot(DEFAULT_OUT)
+    if root["data/qpos"].shape[1] != model.nq:
+        raise ValueError(f"dataset qpos has {root['data/qpos'].shape[1]} values, scene nq={model.nq}")
+    return model, urdf
 
 
 class QposDecoder:

@@ -1,0 +1,36 @@
+# UR5e cube stacking in the DP-paper station world (worlds/dp_station_mujoco.xml), observed like the
+# Diffusion Policy paper's real-world UR5 policies: the fixed front camera + the wrist camera, both
+# 320x240 RGB at 10 Hz (paper App. D.0.1), + proprio. Data: stack_bc collect --wrist-images
+# --front-images in that world. See dp/stack_dp/stack_image_dataset.py.
+name: stack_station_image
+
+image_shape: [3, 240, 320]
+shape_meta: &shape_meta
+  obs:
+    front:
+      shape: ${task.image_shape}
+      type: rgb
+    wrist:
+      shape: ${task.image_shape}
+      type: rgb
+    proprio:
+      shape: [10]        # EE pos3 + EE rot6d + measured gripper width
+      type: low_dim
+  action:
+    shape: [10]          # desired EE pos3 + rot6d + desired width
+
+# Rollouts run in the ROS/MuJoCo sim outside this repo, not during training.
+env_runner:
+  _target_: stack_dp.null_image_runner.NullImageRunner
+
+dataset:
+  _target_: stack_dp.stack_image_dataset.StackImageDataset
+  shape_meta: *shape_meta
+  zarr_path: ${oc.env:HOME}/data/stack_bc/station.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null

@@ -21,6 +21,10 @@ from stack_bc.imageproc import (DEPTH_SHAPE, IMAGE_SHAPE, SOURCE_SHAPE,  # noqa:
                                 depth_frame, downsample2)
 
 IMAGE_TOPIC = "/camera/color/image_raw"
+# DP-paper station world (worlds/dp_station_mujoco.xml): the fixed "front camera" (MJCF front_a), the
+# paper's second policy view. Same plugin, resolution and rate as the wrist camera, so WristCamera
+# reads it unchanged: WristCamera(node, FRONT_IMAGE_TOPIC, name="front").
+FRONT_IMAGE_TOPIC = "/front_camera/color/image_raw"
 DEPTH_TOPIC = "/camera/depth/image_rect_raw"   # 32FC1 metres, same MuJoCo camera render as colour
 # RELIABLE, not the usual sensor-data BEST_EFFORT: a 640x480 rgb8 frame (0.9 MB) travels as many
 # UDP fragments, and a best-effort reader drops the whole frame when any fragment is lost (never
@@ -60,18 +64,20 @@ def _stamp(msg):
     return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
 
-def _check_shape(msg, what):
+def _check_shape(msg, what, name="wrist"):
     if (msg.height, msg.width) != SOURCE_SHAPE:
-        raise ValueError(f"wrist {what} is {msg.width}x{msg.height}, expected "
+        raise ValueError(f"{name} {what} is {msg.width}x{msg.height}, expected "
                          f"{SOURCE_SHAPE[1]}x{SOURCE_SHAPE[0]} (camera resolution changed?)")
 
 
 class WristCamera:
     KEEP = 4   # recent messages kept per stream, to find a colour/depth pair from the same render
 
-    def __init__(self, node, topic=IMAGE_TOPIC, depth=False, depth_topic=DEPTH_TOPIC):
+    def __init__(self, node, topic=IMAGE_TOPIC, depth=False, depth_topic=DEPTH_TOPIC, name="wrist"):
         """node must be spun by an executor in another thread (runtime.SimNode).
-        depth=True also subscribes to the depth stream (same QoS) for latest_rgbd()."""
+        depth=True also subscribes to the depth stream (same QoS) for latest_rgbd().
+        Any CameraPlugin colour stream works (e.g. FRONT_IMAGE_TOPIC); name is for messages."""
+        self.name = name
         self._lock = threading.Lock()
         self._msg = None
         self._color = {}           # stamp -> msg (recent)
@@ -109,7 +115,7 @@ class WristCamera:
             msg = self._msg
         if msg is None:
             return None, None
-        _check_shape(msg, "image")
+        _check_shape(msg, "image", self.name)
         return _stamp(msg), downsample2(image_to_rgb(msg))
 
     def latest_rgbd(self):

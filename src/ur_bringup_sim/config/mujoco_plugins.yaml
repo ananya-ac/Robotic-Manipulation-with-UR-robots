@@ -42,6 +42,23 @@
           info_topic: /camera/color/camera_info
           image_topic: /camera/color/image_raw
           depth_topic: /camera/depth/image_rect_raw
+        # DP-paper station world (worlds/dp_station_mujoco.xml) only - these entries are unused in
+        # worlds without these MJCF cameras. The plugin streams EVERY MJCF camera unless told
+        # otherwise, and camera_publish_rate is global (one rate for all streaming cameras), so:
+        # front_a (the paper's policy "front camera") streams with the wrist camera, and the three
+        # offline-only cameras are disabled (rendered from logged qpos by stack_bc.render_views).
+        front_a:
+          policy: streaming
+          frame_name: front_a
+          info_topic: /front_camera/color/camera_info
+          image_topic: /front_camera/color/image_raw
+          depth_topic: /front_camera/depth/image_rect_raw
+        front_b:
+          policy: disabled
+        topdown:
+          policy: disabled
+        side:
+          policy: disabled
       # Visual domain randomization (src/mujoco_dr_plugin): recolours MJCF materials on request
       # via /color_randomizer/set_colors. Idle (no effect on the scene) until called.
       color_randomizer:

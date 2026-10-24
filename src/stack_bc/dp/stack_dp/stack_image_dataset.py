@@ -2,6 +2,8 @@
 
 Zarr layout (ReplayBuffer format, written by stack_bc.recorder):
   data/wrist_rgb   (T, 240, 320, 3) uint8 : wrist camera RGB at each 10 Hz tick (JPEG 2000)
+  data/front_rgb   (T, 240, 320, 3) uint8 : DP-paper station only (collect --front-images): the fixed
+                                            front camera, the paper's second policy view (JPEG 2000)
   data/wrist_depth (T, 240, 320) uint16   : wrist depth in mm from the same render (0 = invalid);
                                             live (collect --wrist-depth) or backfill_depth.py
   data/state       (T, 37)                : proprio = the first 10 dims: EE pos(3) + EE rot6d(6)
@@ -17,6 +19,7 @@ Observation keys (chosen by the task config's shape_meta; one dataset serves eve
                               repeated for every obs step                  (overview + context)
   wrist_depth   rgb (1, H, W) depth, stack_dp.depth.depth_unit -> [0, 1]   (depth variants B, C)
   wrist_rgbd    rgb (4, H, W) RGB + depth stacked as one image              (depth variant A)
+  front         rgb (3, H, W) the last n_obs_steps front-camera frames       (DP-paper station)
 "rgb" is diffusion_policy's type for any image key (it routes the key to an image encoder).
 
 Images are copied into memory still compressed (zarr MemoryStore, no recompression) and decoded per
@@ -49,7 +52,9 @@ PROPRIO_DIM = 10
 PROPRIO_ROT6D_DIMS = list(range(3, 9))
 RGB_ARRAY = "wrist_rgb"           # zarr arrays
 DEPTH_ARRAY = "wrist_depth"
-OBS_IMAGE_KEYS = ("wrist", "wrist_context", "wrist_depth", "wrist_rgbd")
+# Other camera views: obs key -> zarr array, each read and decoded like wrist_rgb.
+VIEW_ARRAYS = {"front": "front_rgb"}
+OBS_IMAGE_KEYS = ("wrist", "wrist_context", "wrist_depth", "wrist_rgbd") + tuple(VIEW_ARRAYS)
 OBS_LOWDIM_KEYS = ("proprio",)
 NEEDS_RGB = {"wrist", "wrist_context", "wrist_rgbd"}
 NEEDS_DEPTH = {"wrist_depth", "wrist_rgbd"}
@@ -76,8 +81,8 @@ class StackImageDataset(BaseImageDataset):
         unknown = set(obs_meta) - set(OBS_IMAGE_KEYS) - set(OBS_LOWDIM_KEYS)
         if unknown:
             raise ValueError(f"unsupported obs keys {sorted(unknown)}; expected {OBS_IMAGE_KEYS + OBS_LOWDIM_KEYS}")
-        if "proprio" not in obs_meta or not ({"wrist", "wrist_rgbd"} & set(obs_meta)):
-            raise ValueError("shape_meta.obs needs 'proprio' and 'wrist' or 'wrist_rgbd'")
+        if "proprio" not in obs_meta or not ({"wrist", "wrist_rgbd"} | set(VIEW_ARRAYS)) & set(obs_meta):
+            raise ValueError(f"shape_meta.obs needs 'proprio' and one of wrist, wrist_rgbd, {', '.join(VIEW_ARRAYS)}")
         self.obs_keys = [k for k in OBS_IMAGE_KEYS if k in obs_meta]
         arrays = ["state", "action"]
         if NEEDS_RGB & set(obs_meta):
@@ -87,6 +92,13 @@ class StackImageDataset(BaseImageDataset):
             if DEPTH_ARRAY not in zarr.open(zarr_path, "r")["data"]:
                 raise ValueError(f"{zarr_path} has no data/{DEPTH_ARRAY}: record with collect --wrist-depth "
                                  "or add it with python3 -m stack_bc.backfill_depth")
+        root = zarr.open(zarr_path, "r")
+        for key, array in VIEW_ARRAYS.items():
+            if key in obs_meta:
+                if array not in root["data"]:
+                    raise ValueError(f"{zarr_path} has no data/{array}: record in the station world with "
+                                     "collect --wrist-images --front-images")
+                arrays.append(array)
         self.arrays = arrays
 
         self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path, store=zarr.MemoryStore(), keys=arrays)
@@ -150,6 +162,9 @@ class StackImageDataset(BaseImageDataset):
             obs["wrist_depth"] = depth
         if "wrist_rgbd" in self.obs_keys:
             obs["wrist_rgbd"] = np.concatenate([rgb, depth], axis=1)                         # (To, 4, H, W)
+        for key, array in VIEW_ARRAYS.items():
+            if key in self.obs_keys:
+                obs[key] = rgb_chw(sample[array][T_slice])                                    # (To, 3, H, W)
         if "wrist_context" in self.obs_keys:
             # The window's episode: its first buffer index lies inside it (padding repeats inside too).
             buffer_start = self.sampler.indices[idx][0]

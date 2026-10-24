@@ -28,8 +28,7 @@ import zarr  # noqa: E402
 from stack_bc.imageproc import DEPTH_SHAPE, SOURCE_SHAPE, depth_frame  # noqa: E402
 from stack_bc.image_codecs import register_image_codecs  # noqa: E402
 from stack_bc.recorder import compressor_and_chunks  # noqa: E402
-from stack_bc.scene import DEFAULT_OUT  # noqa: E402
-from stack_bc.states import MARKER_SCENE_DIR, MARKER_WORLD, offline_robot  # noqa: E402
+from stack_bc.states import dataset_model  # noqa: E402
 
 CAMERA = "camera"     # the wrist camera in the compiled MJCF (CameraPlugin renders the same one)
 BACKFILL_TAG = "wrist_depth_backfilled"
@@ -56,11 +55,7 @@ class DepthRenderer:
 
 
 def model_for(root):
-    marker = root.attrs.get("marker", "off") == "on"
-    model, _ = offline_robot(MARKER_SCENE_DIR, MARKER_WORLD) if marker else offline_robot(DEFAULT_OUT)
-    if root["data/qpos"].shape[1] != model.nq:
-        raise ValueError(f"dataset qpos has {root['data/qpos'].shape[1]} values, scene nq={model.nq}")
-    return model
+    return dataset_model(root)[0]
 
 
 def backfill(path, overwrite=False, log_every=2000):

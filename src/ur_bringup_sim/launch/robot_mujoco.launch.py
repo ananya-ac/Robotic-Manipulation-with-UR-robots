@@ -58,6 +58,13 @@ from launch_ros.substitutions import FindPackageShare
 MUJOCO_VENV = os.path.expanduser("~/venvs/ros-jazzy")
 
 
+def default_camera_fovy(world):
+    """Wrist camera vertical FOV (deg) per world: the DP-paper station world uses the D415 720p
+    4:3-crop framing (42.5), every other world this D435 model's 640x480 framing (54.9). Same rule
+    as stack_bc.scene.camera_fovy_for - keep the two in sync."""
+    return "42.5" if world.startswith("dp_station") else "54.9"
+
+
 def launch_setup(context, *args, **kwargs):
     ur_type = LaunchConfiguration("ur_type").perform(context)
     headless = LaunchConfiguration("headless").perform(context)
@@ -66,6 +73,7 @@ def launch_setup(context, *args, **kwargs):
     camera_offset_y = LaunchConfiguration("camera_offset_y").perform(context)
     camera_mass = LaunchConfiguration("camera_mass").perform(context)
     world = LaunchConfiguration("world").perform(context)
+    camera_fovy = LaunchConfiguration("camera_fovy").perform(context) or default_camera_fovy(world)
 
     xacro_file = PathJoinSubstitution(
         [FindPackageShare("ur_bringup_sim"), "urdf", "ur5e_2f85_camera_mujoco.urdf.xacro"]
@@ -87,6 +95,7 @@ def launch_setup(context, *args, **kwargs):
         " camera_offset_x:=", camera_offset_x,
         " camera_offset_y:=", camera_offset_y,
         " camera_mass:=", camera_mass,
+        " camera_fovy:=", camera_fovy,
     ]).perform(context)
     robot_only_urdf_path = os.path.join(work_dir, "robot_only.urdf")
     with open(robot_only_urdf_path, "w") as f:
@@ -163,6 +172,7 @@ def launch_setup(context, *args, **kwargs):
         " camera_offset_x:=", camera_offset_x,
         " camera_offset_y:=", camera_offset_y,
         " camera_mass:=", camera_mass,
+        " camera_fovy:=", camera_fovy,
         " headless:=", headless,
         " mujoco_model_path:=", scene_path,
     ]).perform(context)
@@ -255,5 +265,8 @@ def generate_launch_description():
                               description="Diagnostic only: D435 mass in kg (near-zero to "
                                            "test whether camera weight on wrist_3 explains "
                                            "observed wrist behavior)"),
+        DeclareLaunchArgument("camera_fovy", default_value="",
+                              description="Wrist camera vertical FOV in deg; empty = per world "
+                                          "(42.5 for dp_station*, else 54.9)"),
         OpaqueFunction(function=launch_setup),
     ])

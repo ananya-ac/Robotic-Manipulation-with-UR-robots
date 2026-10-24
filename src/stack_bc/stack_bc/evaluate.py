@@ -21,7 +21,8 @@ at task.SCAN_Q like `collect --wrist-images` episodes, and each query sends the 
 live wrist frames (camera.WristCamera, 240x320 uint8) + proprio (state_vector[:10]); the
 overview + context variant also gets the frame of the first tick (the overview) as
 "wrist_context", constant for the episode - exactly what the dataset feeds at training time.
---record then also stores the wrist frames.
+--record then also stores the wrist frames. Policies with a "front" input (DP-paper station world,
+dp_station_mujoco.xml) also get the station's fixed front camera (camera.FRONT_IMAGE_TOPIC).
 """
 
 import argparse
@@ -36,7 +37,7 @@ import zmq
 
 from stack_bc import rotations as rot
 from stack_bc import spaces, task
-from stack_bc.camera import CAMERA_SETTLE, DEPTH_TOPIC, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
+from stack_bc.camera import CAMERA_SETTLE, DEPTH_TOPIC, FRONT_IMAGE_TOPIC, IMAGE_TOPIC, MAX_IMAGE_AGE, WristCamera
 from stack_bc.env import StackEnv, has_marker, stack_success
 from stack_bc.randomize import ColorRandomizer
 from stack_bc.executor import EEExecutor, IKFailure
@@ -123,18 +124,22 @@ def needs_depth(info):
     return "wrist_depth" in policy_inputs(info)
 
 
+def needs_front(info):
+    return "front" in policy_inputs(info)
+
+
 class ObsHistory:
     """The last n_obs_steps observations in the policy server's input format.
 
     Low-dim policies: (To, obs_dim) state_vector rows. Image policies: the server's raw "inputs":
     {"wrist": (To, H, W, 3) uint8, "proprio": (To, 10), ["wrist_depth": (To, H, W) uint16 mm],
-    ["wrist_context": (To, H, W, 3)]}; the server builds the checkpoint's keys from them (e.g.
+    ["wrist_context": (To, H, W, 3)], ["front": (To, H, W, 3) uint8]}; the server builds the checkpoint's keys from them (e.g.
     wrist_rgbd). Like the training windows, the history starts filled with the first observation
     (pad_before repeats it); the context frame is the first tick's wrist frame, i.e. the overview
     at task.SCAN_Q. Colour and depth come from the same render (camera.latest_rgbd); a pair
     without a shared stamp counts as stale."""
 
-    def __init__(self, info, camera=None):
+    def __init__(self, info, camera=None, front_camera=None):
         self.To = info["n_obs_steps"]
         self.inputs = policy_inputs(info)
         if self.inputs and camera is None:
@@ -142,8 +147,12 @@ class ObsHistory:
         self.depth = "wrist_depth" in self.inputs
         if self.depth and not camera.depth:
             raise ValueError("depth policy needs WristCamera(depth=True)")
+        self.front_camera = front_camera if "front" in self.inputs else None
+        if "front" in self.inputs and front_camera is None:
+            raise ValueError("front-camera policy needs the station's front camera")
         self.camera = camera
-        self.stale, self._last_stamp = 0, None
+        self.stale, self._last_stamp, self._last_front_stamp = 0, None, None
+        self.front_frame = None   # newest (stamp, rgb) front frame, for --record
 
     def _frame(self, snap):
         if self.depth:
@@ -157,6 +166,16 @@ class ObsHistory:
         self._last_stamp = stamp
         return (stamp, rgb) if depth is None else (stamp, rgb, depth)
 
+    def _front(self, snap):
+        stamp, rgb = self.front_camera.latest()
+        if rgb is None:
+            raise RuntimeError("no front image")
+        if snap.stamp - stamp > MAX_IMAGE_AGE or stamp == self._last_front_stamp:
+            self.stale += 1
+        self._last_front_stamp = stamp
+        self.front_frame = (stamp, rgb)
+        return rgb
+
     def start(self, snap):
         """First tick: fill the history with this observation. Returns the frame (or None)."""
         if not self.inputs:
@@ -167,6 +186,8 @@ class ObsHistory:
         self.wrist = deque([frame[1]] * self.To, maxlen=self.To)
         if self.depth:
             self.wrist_depth = deque([frame[2]] * self.To, maxlen=self.To)
+        if self.front_camera is not None:
+            self.front = deque([self._front(snap)] * self.To, maxlen=self.To)
         self.proprio = deque([spaces.state_vector(snap)[:10]] * self.To, maxlen=self.To)
         return frame
 
@@ -179,6 +200,8 @@ class ObsHistory:
         self.wrist.append(frame[1])
         if self.depth:
             self.wrist_depth.append(frame[2])
+        if self.front_camera is not None:
+            self.front.append(self._front(snap))
         self.proprio.append(spaces.state_vector(snap)[:10])
         return frame
 
@@ -192,14 +215,17 @@ class ObsHistory:
             out["wrist_depth"] = np.stack(self.wrist_depth)
         if "wrist_context" in self.inputs:
             out["wrist_context"] = np.repeat(self.context[None], self.To, axis=0)
+        if self.front_camera is not None:
+            out["front"] = np.stack(self.front)
         return out
 
 
 def rollout(sim, env, ex, client, info, xy, yaw, max_time, buf=None, log=print, marker_xy=None, colors=None,
-            camera=None):
+            camera=None, front_camera=None):
     """marker_xy: stack-location marker (marker world; success requires the tower on it).
     colors: (randomize.ColorRandomizer, rgba) applied after the reset.
-    camera: camera.WristCamera, required for image policies (which start at task.SCAN_Q)."""
+    camera: camera.WristCamera, required for image policies (which start at task.SCAN_Q).
+    front_camera: camera.WristCamera on FRONT_IMAGE_TOPIC, required for policies with a "front" input."""
     To, Ta = info["n_obs_steps"], info["n_action_steps"]
     ex.move_joints(task.HOME_Q, 2.5)
     ex.set_width(WIDTH_OPEN, force=True)
@@ -215,7 +241,7 @@ def rollout(sim, env, ex, client, info, xy, yaw, max_time, buf=None, log=print, 
     ex.sync(snap.q_arm, snap.ee)
 
     client.reset()
-    history = ObsHistory(info, camera)
+    history = ObsHistory(info, camera, front_camera)
     chunk, targets, latencies = None, None, []
     hold, reason, success = 0, "timeout", False
     t_start = t_next = sim.now()
@@ -238,7 +264,7 @@ def rollout(sim, env, ex, client, info, xy, yaw, max_time, buf=None, log=print, 
         width = WIDTH_OPEN if chunk[i][9] > GRIPPER_THRESHOLD else WIDTH_CLOSED
         ex.set_width(width)
         if buf is not None:
-            buf.record(snap, targets[i], width, image=frame)
+            buf.record(snap, targets[i], width, image=frame, front=history.front_frame)
 
         hold = hold + 1 if any_order_success(snap, marker_xy) else 0
         if hold >= SUCCESS_HOLD_TICKS:
@@ -275,11 +301,21 @@ def main():
         if not sim.wait_for(camera.ready, 10.0):
             raise RuntimeError(f"image policy but no wrist images on {IMAGE_TOPIC}"
                                + (f" / {DEPTH_TOPIC}" if needs_depth(info) else ""))
+    front_camera = None
+    if needs_front(info):
+        if not env.has_station:
+            raise RuntimeError("the policy takes the front camera: launch the station world "
+                               "(world:=dp_station_mujoco.xml)")
+        front_camera = WristCamera(sim.node, FRONT_IMAGE_TOPIC, name="front")
+        if not sim.wait_for(front_camera.ready, 10.0):
+            raise RuntimeError(f"no front images on {FRONT_IMAGE_TOPIC}")
     writer = None
     if args.record:
         writer = ReplayWriter(os.path.expanduser(args.record),
-                              images="wrist_rgb" if camera else "none", start="scan" if camera else "home",
-                              depth="wrist_depth" if camera is not None and camera.depth else "none")
+                              images=("wrist_rgb,front_rgb" if front_camera else "wrist_rgb") if camera else "none",
+                              start="scan" if camera else "home",
+                              depth="wrist_depth" if camera is not None and camera.depth else "none",
+                              station="dp" if env.has_station else "off")
 
     results = []
     randomizer = None
@@ -290,7 +326,8 @@ def main():
         buf = EpisodeBuffer(env.model) if writer else None
         t0 = time.time()
         res = rollout(sim, env, ex, client, info, xy, yaw, args.max_time, buf, marker_xy=marker_xy,
-                      colors=(randomizer, rgba) if rgba is not None else None, camera=camera)
+                      colors=(randomizer, rgba) if rgba is not None else None, camera=camera,
+                      front_camera=front_camera)
         results.append(res)
         if writer and len(buf):
             extra_meta = {}

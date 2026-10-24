@@ -19,6 +19,8 @@ zarr datasets written by `stack_bc.collect`:
 | `stack_dp/vision.py` | `get_resnet_in_chans` (ResNet for 1/4 input channels) and `RGBDCrossAttnEncoder` (variant C) |
 | `config/train_stack_wrist_depth.yaml` | The depth ablation's train config: as `train_stack_wrist_image.yaml`, encoder from the task |
 | `config/task/stack_wrist_rgbd.yaml`, `stack_wrist_depth_late.yaml`, `stack_wrist_depth_xattn.yaml` | Depth variants A (early fusion), B (late fusion), C (cross-attention) |
+| `config/train_stack_station_image.yaml` | DP-paper station (front + wrist cameras): as `train_stack_wrist_image.yaml` with the paper's real Push-T Ta=6 |
+| `config/task/stack_station_image.yaml` | Station: front + wrist frames + proprio (dataset `~/data/stack_bc/station.zarr`; obs key `front` = `data/front_rgb`) |
 
 Environment setup (the `robodiff` conda env) is in the workspace's `SETUP.md`.
 
@@ -74,6 +76,18 @@ PYTHONPATH=~/ur_ws_jazzy/src/stack_bc/dp python train.py \
   hydra.run.dir=data/outputs/wrist_overview
 # overview + context: task=stack_wrist_context_image, hydra.run.dir=data/outputs/wrist_context
 ```
+
+DP-paper station (front + wrist cameras, recorded in `world:=dp_station_mujoco.xml` with
+`collect --wrist-images --front-images`):
+
+```bash
+PYTHONPATH=~/ur_ws_jazzy/src/stack_bc/dp python train.py \
+  --config-dir=$HOME/ur_ws_jazzy/src/stack_bc/dp/config --config-name=train_stack_station_image.yaml \
+  task.dataset.zarr_path=$HOME/data/stack_bc/station.zarr hydra.run.dir=data/outputs/station
+```
+
+Two ResNet-18 trunks, like the context variant: on the 8 GB laptop only as a smoke test with a smaller
+U-Net (`"policy.down_dims=[256,512,1024]"`, batch 8); train on the bigger GPU.
 
 Memory: with the paper-sized U-Net (down_dims 512/1024/2048) the context variant does not fit an 8 GB
 laptop GPU even at batch 8 (two ResNet-18 encoders + AdamW state); the overview-start variant does

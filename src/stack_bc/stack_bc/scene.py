@@ -29,6 +29,13 @@ XACRO_ARGS = {
 }
 
 
+def camera_fovy_for(world):
+    """Wrist camera vertical FOV (deg) the launch file uses for this world (robot_mujoco.launch.py's
+    default_camera_fovy - keep in sync): 42.5 = D415 720p centre-cropped to 4:3 (DP-paper station),
+    54.9 = the D435 model's own 640x480 framing."""
+    return "42.5" if world.startswith("dp_station") else "54.9"
+
+
 def build_scene(out_dir=DEFAULT_OUT, world="tabletop_mujoco.xml"):
     """Generate the spliced scene into out_dir and return the scene.xml path."""
     os.makedirs(out_dir, exist_ok=True)
@@ -38,7 +45,8 @@ def build_scene(out_dir=DEFAULT_OUT, world="tabletop_mujoco.xml"):
     convert_script = os.path.join(get_package_share_directory("mujoco_ros2_control"), "scripts",
                                   "make_mjcf_from_robot_description.py")
 
-    urdf = subprocess.run(["xacro", xacro_file] + [f"{k}:={v}" for k, v in XACRO_ARGS.items()],
+    xacro_args = dict(XACRO_ARGS, camera_fovy=camera_fovy_for(world))
+    urdf = subprocess.run(["xacro", xacro_file] + [f"{k}:={v}" for k, v in xacro_args.items()],
                           check=True, capture_output=True, text=True).stdout
     urdf_path = os.path.join(out_dir, "robot_only.urdf")
     with open(urdf_path, "w") as f:

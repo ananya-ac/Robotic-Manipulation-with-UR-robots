@@ -21,6 +21,7 @@ Protocol (ZMQ REQ/REP on localhost, pickled dicts - local and trusted only):
       info["obs_keys"] = the checkpoint's keys ({key: {"shape", "type"}}); info["inputs"] = the RAW
       inputs to send, "obs" = {input: array}:
         wrist, wrist_context  (To, H, W, 3) uint8 RGB, as recorded (data/wrist_rgb)
+        front                 (To, H, W, 3) uint8 RGB, station front camera (data/front_rgb)
         wrist_depth           (To, H, W) uint16 mm, as recorded (data/wrist_depth)
         proprio               (To, 10) float32 (spaces.state_vector(snap)[:10])
       The server builds the checkpoint's keys from them exactly as stack_image_dataset does
@@ -71,6 +72,7 @@ def obs_spec(cfg):
 # Checkpoint image keys -> the raw client inputs they are built from (stack_image_dataset's keys).
 # Raw inputs: "wrist" / "wrist_context" (To, H, W, 3) uint8 RGB, "wrist_depth" (To, H, W) uint16 mm.
 KEY_INPUTS = {"wrist": ("wrist",), "wrist_context": ("wrist_context",), "wrist_depth": ("wrist_depth",),
+              "front": ("front",),   # DP-paper station front camera (data/front_rgb), as recorded
               "wrist_rgbd": ("wrist", "wrist_depth")}
 
 

@@ -50,6 +50,11 @@
        off wrist_3) is contributing to observed wrist behavior - inertia scales down with it
        (see realsense_d435.xacro's own comment). Leave at the default for real use. -->
   <xacro:arg name="camera_mass" default="0.072"/>
+  <!-- Wrist camera vertical FOV (deg) of the MJCF <camera> below. 54.9 = this D435 model's own
+       640x480 framing (derivation at the <camera>). 42.5 = a RealSense D415/D435 colour stream at
+       1280x720 centre-cropped to 4:3, the Diffusion Policy paper's real-world image pipeline
+       (worlds/dp_station_mujoco.xml; robot_mujoco.launch.py and stack_bc.scene pick it per world). -->
+  <xacro:arg name="camera_fovy" default="54.9"/>
 
   <!-- wrist camera geometry, mounted on the UR tool flange (rigid regardless of gripper).
        Hardware-agnostic macro, identical to the Gazebo file's usage. Declared before
@@ -140,7 +145,7 @@
        fovy = 2*atan(tan(hfov/2) * height/width) = 2*atan(tan(0.6056) * 0.75) ~= 54.9 deg. -->
   <xacro:property name="extra_processed_inputs">
     <camera site="$(arg tf_prefix)camera_color_toein_frame" name="$(arg tf_prefix)camera"
-            fovy="54.9" mode="fixed" resolution="640 480"/>
+            fovy="$(arg camera_fovy)" mode="fixed" resolution="640 480"/>
   </xacro:property>
 
   <!-- Camera's ros2_control <sensor> entry - merged into ur_gripper_2f85_mujoco.urdf.xacro's

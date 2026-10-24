@@ -73,6 +73,7 @@ class StackEnv:
         self.model = mujoco.MjModel.from_xml_path(match.group(1).strip())
         self.width_gauge = WidthGauge(self.model)
         self.has_marker = has_marker(self.model)
+        self.has_station = has_station(self.model)
 
         self._lock = threading.Lock()
         self._joints, self._joints_stamp = None, None
@@ -173,6 +174,12 @@ class StackEnv:
         future.add_done_callback(lambda _: done.set())
         if not done.wait(timeout) or not future.result().success:
             raise RuntimeError(f"reset_world failed: {future.result().message if future.done() else 'timeout'}")
+
+
+def has_station(model):
+    """Whether a compiled model is the DP-paper station world (dp_station_mujoco.xml: marker task +
+    the paper's camera rig, identified by its policy front camera)."""
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, task.STATION_FRONT_CAMERA) >= 0
 
 
 def has_marker(model):

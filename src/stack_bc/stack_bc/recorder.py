@@ -35,6 +35,14 @@ Wrist images (collect --wrist-images; camera.py):
   attrs["images"]                         "wrist_rgb" (untagged = "none")
   attrs["start"]                          "scan": episodes start at task.SCAN_Q, so frame 0 is the
                                           overview of the whole spawn region (untagged = "home")
+Front camera (collect --front-images; DP-paper station world dp_station_mujoco.xml only):
+  data/front_rgb      (T, 240, 320, 3) uint8  fixed front camera (MJCF front_a) RGB, newest frame
+                                          at each tick, JPEG2k like wrist_rgb
+  data/front_stamp    (T,)     float64   sim time of that frame
+  attrs["images"]                         "wrist_rgb,front_rgb"
+  attrs["station"]                        "dp": recorded in the station world - offline tools must
+                                          load its model (wrist camera fovy 42.5, extra cameras;
+                                          states.dataset_model) (untagged = "off")
 Wrist depth (collect --wrist-depth, or backfill_depth.py from qpos):
   data/wrist_depth    (T, 240, 320) uint16  depth in millimetres from the same render as wrist_rgb
                                           (pixel-aligned; 0 = invalid), 2x2 minimum downsampling;
@@ -59,7 +67,7 @@ from stack_bc.rotations import matrix_to_quat
 
 COMPRESSOR = Blosc(cname="zstd", clevel=5, shuffle=Blosc.BITSHUFFLE)
 CHUNK_STEPS = 1024
-IMAGE_KEYS = ("wrist_rgb",)       # uint8 image arrays: lossy JPEG2k, one frame per chunk
+IMAGE_KEYS = ("wrist_rgb", "front_rgb")   # uint8 image arrays: lossy JPEG2k, one frame per chunk
 FRAME_KEYS = ("wrist_depth",)     # per-frame arrays kept lossless (depth: exact millimetres)
 JPEG2K_LEVEL = 50                 # as diffusion_policy's real-world data conversion
 
@@ -85,13 +93,15 @@ class EpisodeBuffer:
     def __len__(self):
         return len(self.rows["state"])
 
-    def record(self, snap, T_cmd, width_cmd, perceived=None, image=None):
+    def record(self, snap, T_cmd, width_cmd, perceived=None, image=None, front=None):
         """perceived: optional (N_CUBES * 9,) the oracle's perceived object poses (oracle_obj_unknown)
         -> data/obj_pose_perceived. Absent for oracle_obj_known, whose schema is unchanged.
         A snapshot with a marker also logs data/target_pose.
         image: optional (stamp, (240, 320, 3) uint8) from camera.WristCamera.latest() ->
         data/wrist_rgb + data/wrist_stamp, or (stamp, rgb, (240, 320) uint16 depth mm) from
-        latest_rgbd() -> also data/wrist_depth."""
+        latest_rgbd() -> also data/wrist_depth.
+        front: optional (stamp, (240, 320, 3) uint8) from the station's front camera ->
+        data/front_rgb + data/front_stamp."""
         qpos = np.zeros(self.nq)
         qpos[self.arm_adr] = snap.q_arm
         qpos[self.grip_adr] = snap.q_gripper
@@ -118,30 +128,33 @@ class EpisodeBuffer:
             r.setdefault("wrist_rgb", []).append(image[1])
             if len(image) > 2 and image[2] is not None:
                 r.setdefault("wrist_depth", []).append(image[2])
+        if front is not None:
+            r.setdefault("front_stamp", []).append(front[0])
+            r.setdefault("front_rgb", []).append(front[1])
 
     def arrays(self):
         dtypes = {"qpos": np.float64, "timestamp": np.float64, "wrist_stamp": np.float64, "wrist_rgb": np.uint8,
-                  "wrist_depth": np.uint16}
+                  "wrist_depth": np.uint16, "front_stamp": np.float64, "front_rgb": np.uint8}
         return {k: np.asarray(v, dtype=dtypes.get(k, np.float32)) for k, v in self.rows.items()}
 
 
 class ReplayWriter:
     # Dataset tags: attrs key -> the value an untagged dataset that already has data implies.
     TAGS = {"oracle": "obj_known", "transit": "lin", "marker": "off", "dr": "none", "images": "none",
-            "start": "home", "depth": "none"}
+            "start": "home", "depth": "none", "station": "off"}
 
     def __init__(self, path, oracle=None, transit=None, marker=None, dr=None, images=None, start=None,
-                 depth=None):
+                 depth=None, station=None):
         """oracle: 'obj_known' | 'obj_unknown' -> root.attrs['oracle']. transit: 'lin' | 'ompl'
         (oracle_obj_known's transit planner). marker: 'on' | 'off'. dr: 'colors' | 'none'.
-        images: 'wrist_rgb' | 'none'. start: 'scan' | 'home' (recorded episodes' first pose).
-        depth: 'wrist_depth' | 'none'.
+        images: 'wrist_rgb' | 'wrist_rgb,front_rgb' | 'none'. start: 'scan' | 'home' (recorded
+        episodes' first pose). depth: 'wrist_depth' | 'none'. station: 'dp' | 'off' (DP-paper station world).
         Appending episodes with a different tag than the dataset's is refused (an untagged
         dataset implies TAGS)."""
         register_image_codecs()           # so image arrays of an existing dataset can be opened
         self.root = zarr.open_group(path, mode="a")
         for key, value in (("oracle", oracle), ("transit", transit), ("marker", marker), ("dr", dr),
-                           ("images", images), ("start", start), ("depth", depth)):
+                           ("images", images), ("start", start), ("depth", depth), ("station", station)):
             if value is None:
                 continue
             existing = self.root.attrs.get(key, self.TAGS[key] if "data" in self.root else None)
